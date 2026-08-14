@@ -1,0 +1,47 @@
+# systemd 服务单元：让 qqbot 在后台常驻、开机自启、崩溃自重启。
+#
+# 安装（需要 sudo，输入你的密码）：
+#   sudo cp deploy/qqbot.service /etc/systemd/system/qqbot.service
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now qqbot          # 开机自启 + 立即启动
+#
+# 常用命令：
+#   sudo systemctl status qqbot                 # 查看状态
+#   sudo journalctl -u qqbot -f                 # 实时看日志
+#   sudo systemctl restart qqbot                # 改完代码重新编译后重启
+#   sudo systemctl stop qqbot                   # 优雅停止（发 SIGINT）
+#
+# 注意：改了代码后要先重新编译再重启：
+#   go build -o qqbot . && sudo systemctl restart qqbot
+# （开发期可用 air 热重载；这个服务用于长期后台运行。）
+
+[Unit]
+Description=QQ Bot (NapCat / qqbot)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=admins
+# 工作目录指向项目根，bot 启动时会读取这里的 .env
+WorkingDirectory=/home/1944876825/projects/qqbot
+ExecStart=/home/1944876825/projects/qqbot/qqbot
+
+# 进程异常退出/崩溃后自动重启（systemctl stop 是主动停止，不会触发重启）
+Restart=always
+RestartSec=3
+
+# 优雅停止：先发 SIGINT（bot 会优雅断开 WebSocket），10s 后仍未退出才 SIGKILL
+KillSignal=SIGINT
+TimeoutStopSec=10
+
+# 日志走 journald，用 journalctl -u qqbot 查看
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=qqbot
+
+# 轻量加固（可选，按需开启更多）
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

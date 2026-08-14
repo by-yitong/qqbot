@@ -1,0 +1,10 @@
+# 把技能放进来：每个文件是一个 SKILL.md（YAML frontmatter + markdown 正文）。
+#
+# 示例 weather.md：
+# ---
+# name: weather
+# description: 当用户问天气时使用
+# ---
+# 查天气的指引……
+#
+# 所有 *.md 会被加载并注入 agent 的 system prompt。

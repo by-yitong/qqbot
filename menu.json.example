@@ -1,0 +1,36 @@
+{
+  "//": "复制为 menu.json 可自定义菜单与指令面板（不复制则用内置默认）。AGENT_MENU=0 可关闭启动自动发布，.menu apply 手动发布，.menu clear 清除。",
+  "//hint": "按钮点击后是把文本填入聊天输入框（用户再按发送）。内容用命令的中文别名（如「状态」）最干净：私聊免前缀直接命中；群里整条消息恰好等于命令名/别名也会放行。",
+  "//menu": "C2C 单聊窗口底部菜单（最多 10 项）。type: send_message(填入输入框) / link(跳转,须https) / menu(折叠)。",
+  "menu": {
+    "items": [
+      { "name": "帮助", "type": "send_message", "send_message": "帮助" },
+      { "name": "状态", "type": "send_message", "send_message": "状态" },
+      { "name": "用量", "type": "send_message", "send_message": "用量" },
+      {
+        "name": "会话",
+        "type": "menu",
+        "sub_menu_items": [
+          { "name": "停止当前任务", "type": "send_message", "send_message": "停止" },
+          { "name": "清空对话", "type": "send_message", "send_message": "清空对话" }
+        ]
+      }
+    ]
+  },
+  "//panels": "指令面板（每机器人最多 20 个，每面板最多 20 元素）。scope: c2c/group/channel/dm；target_type: all/specific（specific 仅 c2c/group，需给 user_openids/group_openids）。command 的 name 是点击后填入输入框的内容（中文别名即可）；link 的 link 为 https 地址。remark 是开发者备注（自动发布按 qqbot-auto 标记管理旧面板，建议保留）。",
+  "panels": [
+    {
+      "scope": "group",
+      "target_type": "all",
+      "panel": {
+        "remark": "qqbot-auto",
+        "items": [
+          { "type": "command", "name": "帮助", "desc": "查看所有命令" },
+          { "type": "command", "name": "状态", "desc": "当前处理状态" },
+          { "type": "command", "name": "用量", "desc": "token 用量统计" },
+          { "type": "command", "name": "菜单", "desc": "菜单管理", "only_admin": true }
+        ]
+      }
+    }
+  ]
+}

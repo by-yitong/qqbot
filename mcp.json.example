@@ -1,0 +1,19 @@
+{
+  "_注释": "复制本文件为 mcp.json（或改 AGENT_MCP_CONFIG 指向别处）。对照 Claude Desktop 格式。env 值支持 ${VAR} 引用 .env 变量（如密钥），未匹配的 $ 字面保留。",
+  "mcpServers": {
+    "stdio示例": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "@some/mcp-server"],
+      "env": { "API_KEY": "${AI_API_KEY}" }
+    },
+    "http示例": {
+      "type": "http",
+      "url": "http://127.0.0.1:8080/mcp"
+    },
+    "sse示例": {
+      "type": "sse",
+      "url": "http://127.0.0.1:8080/sse"
+    }
+  }
+}

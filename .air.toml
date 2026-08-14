@@ -1,0 +1,38 @@
+# air 热重载配置。
+# 用法：在项目根目录执行 `air`，改 .go / .env 后自动重新编译并重启 bot。
+# 安装：go install github.com/air-verse/air@latest （air 是全局工具，不进 go.mod）
+
+root = "."
+tmp_dir = "tmp"
+
+[build]
+  # 编译根目录的 main 包到 tmp/main
+  cmd = "go build -o ./tmp/main ."
+  bin = "./tmp/main"
+  entrypoint = ["./tmp/main"]
+
+  # 监听这些扩展名的文件变化（含 .env：改配置也会重启）
+  include_ext = ["go", "env"]
+  # 忽略这些目录（tmp 是输出目录，必须忽略，否则会无限循环重建）
+  exclude_dir = ["tmp", "vendor", ".git", "testdata"]
+  # 改测试文件不触发重建
+  exclude_regex = ["_test.go"]
+
+  # 文件改动后等 500ms 再重建（防抖）
+  delay = 500
+  # 优雅关闭：先发 SIGINT（bot 会优雅断开），1s 后仍未退出才强杀
+  send_interrupt = true
+  kill_delay = "1s"
+  # 编译失败时保留上一次能跑的版本继续运行（不让 bot 因手滑的语法错误下线）
+  stop_on_error = false
+  log = "tmp/build-errors.log"
+
+[log]
+  time = true
+
+[misc]
+  # air 退出时清理 tmp/
+  clean_on_exit = true
+
+[screen]
+  clear_on_rebuild = false

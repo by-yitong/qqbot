@@ -1,0 +1,28 @@
+# Local environment / secrets
+.env
+mcp.json
+menu.json
+
+# agent 会话历史 / 文件工具根目录（含用户隐私，勿提交）
+/data/
+
+# bot 工作目录（bash/文件工具的运行时产物）
+/workspace/
+
+# Compiled binary
+/qqbot
+/*.exe
+
+# air 热重载产物
+/tmp/
+
+# air 后台运行产物
+/.air.pid
+/logs/
+
+# 工具内部目录（ZCode 等）
+/.zcode/
+
+# build-run.sh 常驻进程 pid
+/.qqbot.pid
+/imghost
