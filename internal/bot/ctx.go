@@ -148,6 +148,18 @@ func (c *Ctx) ReplyImage(imageURL string) (string, error) {
 	}
 }
 
+// ReplyVideo 以视频回复当前消息（file_type=2，URL 模式）。仅群/私聊支持。
+func (c *Ctx) ReplyVideo(videoURL string) (string, error) {
+	switch c.Source {
+	case "group":
+		return c.Bot.SendGroupVideo(c.Context, c.groupID, c.messageID, videoURL)
+	case "c2c":
+		return c.Bot.SendC2CVideo(c.Context, c.userID, c.messageID, videoURL)
+	default:
+		return "", ErrChannelImageUnsupported
+	}
+}
+
 // send 按来源分支发送一条消息，自动带上被动回复锚点（MsgID/MsgSeq/引用）。
 func (c *Ctx) send(msg *dto.MessageToCreate) (string, error) {
 	api := c.Bot.api

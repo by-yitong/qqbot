@@ -146,11 +146,19 @@ func (a *Agent) Run(ctx context.Context, userID, userText string, opts ...RunOpt
 		sys := a.systemPromptFor(o)
 		result, err := a.cfg.LLM.Complete(loopCtx, sys, msgs, tools)
 		// 上下文超长：强制压缩（用更紧凑的历史）后重试一次。每次 Run 至多一次，避免死循环。
+		// 急救路径用比配置更紧的保留窗口（配置可能设得很大——曾有人设 120，压缩完仍超限）。
 		if err != nil && errors.Is(err, ErrContextOverflow) && !overflowCompacted {
 			overflowCompacted = true
-			if compacted, cerr := Compact(loopCtx, a.cfg.LLM, msgs, a.cfg.KeepRecent); cerr == nil {
+			keep := a.cfg.KeepRecent
+			if keep <= 0 || keep > 20 {
+				keep = 20
+			}
+			if compacted, cerr := Compact(loopCtx, a.cfg.LLM, msgs, keep); cerr == nil {
 				msgs = compacted
+				log.Printf("[agent] 上下文超长，已压缩急救（保留 %d 条近期消息）", keep)
 				result, err = a.cfg.LLM.Complete(loopCtx, sys, msgs, tools)
+			} else {
+				log.Printf("[agent] 溢出急救压缩失败: %v", cerr)
 			}
 		}
 		if err != nil {

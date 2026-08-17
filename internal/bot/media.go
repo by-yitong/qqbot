@@ -41,13 +41,13 @@ func (m richMediaMsg) GetEventID() string { return m.MsgID }
 // （MsgType=7 的发送走 messages，不是 files；MessageToCreate 也是这么返回的）。
 func (m richMediaMsg) GetSendType() dto.SendType { return dto.Text }
 
-// SendGroupImage 发群图片：把 imageURL 按 URL 模式上传富媒体 → 发 MsgType=7 消息。
-// msgAnchor 空=主动（需权限）；非空=被动回复（5min 内锚点）。返回新消息 id。
-func (b *Bot) SendGroupImage(ctx context.Context, groupID, msgAnchor, imageURL string) (string, error) {
+// sendRichMedia 上传并发送一条富媒体消息（MsgType=7）的公共路径。
+// group=true 走群、false 走 C2C；fileType: 1图片/2视频/3语音。
+func (b *Bot) sendRichMedia(ctx context.Context, group bool, openID, msgAnchor string, fileType int, fileURL string) (string, error) {
 	if b.api == nil {
 		return "", ErrNotConnected
 	}
-	fileInfo, err := b.uploadRichMedia(ctx, true, groupID, 1, imageURL)
+	fileInfo, err := b.uploadRichMedia(ctx, group, openID, fileType, fileURL)
 	if err != nil {
 		return "", err
 	}
@@ -57,27 +57,33 @@ func (b *Bot) SendGroupImage(ctx context.Context, groupID, msgAnchor, imageURL s
 		MsgSeq:  b.nextSeq(),
 		Media:   &richMediaInfo{FileInfo: fileInfo},
 	}
-	m, err := b.api.PostGroupMessage(ctx, groupID, msg)
+	if group {
+		m, err := b.api.PostGroupMessage(ctx, openID, msg)
+		return msgID(m), err
+	}
+	m, err := b.api.PostC2CMessage(ctx, openID, msg)
 	return msgID(m), err
+}
+
+// SendGroupImage 发群图片：把 imageURL 按 URL 模式上传富媒体 → 发 MsgType=7 消息。
+// msgAnchor 空=主动（需权限）；非空=被动回复（5min 内锚点）。返回新消息 id。
+func (b *Bot) SendGroupImage(ctx context.Context, groupID, msgAnchor, imageURL string) (string, error) {
+	return b.sendRichMedia(ctx, true, groupID, msgAnchor, 1, imageURL)
 }
 
 // SendC2CImage 发私聊图片（同 SendGroupImage 语义）。
 func (b *Bot) SendC2CImage(ctx context.Context, userID, msgAnchor, imageURL string) (string, error) {
-	if b.api == nil {
-		return "", ErrNotConnected
-	}
-	fileInfo, err := b.uploadRichMedia(ctx, false, userID, 1, imageURL)
-	if err != nil {
-		return "", err
-	}
-	msg := richMediaMsg{
-		MsgType: int(dto.RichMediaMsg),
-		MsgID:   msgAnchor,
-		MsgSeq:  b.nextSeq(),
-		Media:   &richMediaInfo{FileInfo: fileInfo},
-	}
-	m, err := b.api.PostC2CMessage(ctx, userID, msg)
-	return msgID(m), err
+	return b.sendRichMedia(ctx, false, userID, msgAnchor, 1, imageURL)
+}
+
+// SendGroupVideo 发群视频（file_type=2，URL 模式，QQ 自行下载该 URL）。
+func (b *Bot) SendGroupVideo(ctx context.Context, groupID, msgAnchor, videoURL string) (string, error) {
+	return b.sendRichMedia(ctx, true, groupID, msgAnchor, 2, videoURL)
+}
+
+// SendC2CVideo 发私聊视频（同 SendGroupVideo 语义）。
+func (b *Bot) SendC2CVideo(ctx context.Context, userID, msgAnchor, videoURL string) (string, error) {
+	return b.sendRichMedia(ctx, false, userID, msgAnchor, 2, videoURL)
 }
 
 // uploadRichMedia 按 URL 模式上传富媒体到群或 C2C，返回 file_info（用于 MsgType=7 发送）。

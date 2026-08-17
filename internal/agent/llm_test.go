@@ -9,6 +9,38 @@ import (
 	"testing"
 )
 
+func TestIsOverflowResponse(t *testing.T) {
+	overflow := []struct {
+		status int
+		body   string
+	}{
+		{400, `{"error":{"code":"1261","message":"Prompt exceeds max length"}}`}, // bigmodel
+		{400, `{"error":{"message":"This model's maximum context length is 8192 tokens"}}`},
+		{400, `context_length_exceeded`},
+		{413, `too large`},
+	}
+	for _, tc := range overflow {
+		if !isOverflowResponse(tc.status, tc.body) {
+			t.Errorf("HTTP %d %q 应识别为溢出", tc.status, tc.body)
+		}
+	}
+	// 非溢出：普通 400 / 401 不应误判（否则会把配额/鉴权错误当超长去压缩）
+	notOverflow := []struct {
+		status int
+		body   string
+	}{
+		{400, `{"error":{"message":"invalid request body"}}`},
+		{401, `unauthorized`},
+		{429, `rate limited`},
+		{200, `ok`},
+	}
+	for _, tc := range notOverflow {
+		if isOverflowResponse(tc.status, tc.body) {
+			t.Errorf("HTTP %d %q 不应识别为溢出", tc.status, tc.body)
+		}
+	}
+}
+
 // llmFixture 起一个假的 /chat/completions 端点，固定返回 respJSON。
 func llmFixture(t *testing.T, respJSON string) *httptest.Server {
 	t.Helper()

@@ -2,12 +2,13 @@ package agent
 
 import (
 	"context"
+	"strconv"
 	"strings"
 	"testing"
 )
 
 func TestEstimateTokens(t *testing.T) {
-	msgs := []Message{{Role: RoleUser, Content: strings.Repeat("a", 400)}} // 400 字符 → ~100 token
+	msgs := []Message{{Role: RoleUser, Content: strings.Repeat("a", 400)}} // 400 ASCII → 100 token
 	if got := EstimateTokens(msgs); got != 100 {
 		t.Errorf("EstimateTokens=%d want 100", got)
 	}
@@ -19,6 +20,95 @@ func TestEstimateTokens(t *testing.T) {
 	}
 	if ShouldCompact(msgs, 0) {
 		t.Error("阈值 0 表示关闭，不应触发")
+	}
+}
+
+func TestEstimateTokensCJK(t *testing.T) {
+	// 中文每字按 1 token（字节/4 会把 100 个汉字估成 75，实际约 100+，曾低估致撑爆上下文）
+	msgs := []Message{{Role: RoleUser, Content: strings.Repeat("中", 100)}}
+	if got := EstimateTokens(msgs); got != 100 {
+		t.Errorf("100 个汉字应估 100, got %d", got)
+	}
+	// 混合：50 汉字 + 200 ASCII（50 + 50 = 100）
+	msgs = []Message{{Role: RoleUser, Content: strings.Repeat("中", 50) + strings.Repeat("a", 200)}}
+	if got := EstimateTokens(msgs); got != 100 {
+		t.Errorf("混合文本应估 100, got %d", got)
+	}
+	// 工具参数也计入
+	msgs = []Message{{Role: RoleAssistant, ToolCalls: []ToolCall{{Name: "web_search", Arguments: strings.Repeat("查", 30)}}}}
+	if got := EstimateTokens(msgs); got < 30 {
+		t.Errorf("工具参数应计入估算, got %d", got)
+	}
+}
+
+func TestSplitConvChunks(t *testing.T) {
+	// 短文本单块
+	if got := splitConvChunks("abc", 100); len(got) != 1 || got[0] != "abc" {
+		t.Errorf("短文本应单块: %q", got)
+	}
+	if got := splitConvChunks("", 100); got != nil {
+		t.Errorf("空文本应返回 nil: %v", got)
+	}
+	// 长文本多块：块内不超预算、拼接还原原文、优先换行处断开
+	line := strings.Repeat("一", 40) + "\n" // 每行 41 字符
+	conv := strings.Repeat(line, 20)       // 820 字符
+	chunks := splitConvChunks(conv, 100)
+	if len(chunks) < 2 {
+		t.Fatalf("820 字符按预算 100 应至少 2 块, got %d", len(chunks))
+	}
+	for i, c := range chunks {
+		if len([]rune(c)) > 100 {
+			t.Errorf("第 %d 块超预算: %d", i, len([]rune(c)))
+		}
+	}
+	if strings.Join(chunks, "") != conv {
+		t.Error("分块拼接应还原原文")
+	}
+	// 有换行时应在换行处断
+	for _, c := range chunks[:len(chunks)-1] {
+		if !strings.HasSuffix(c, "\n") {
+			t.Errorf("块尾应是换行（预算内存在换行时）: %q", c[len(c)-10:])
+		}
+	}
+}
+
+// chunkLLM 记录每次摘要调用收到的 user prompt（用于断言分块大小与链式增量）。
+type chunkLLM struct {
+	prompts []string
+}
+
+func (c *chunkLLM) Complete(_ context.Context, _ string, msgs []Message, _ []map[string]any) (*LLMResult, error) {
+	c.prompts = append(c.prompts, msgs[len(msgs)-1].Content)
+	return &LLMResult{Content: "摘要-" + strconv.Itoa(len(c.prompts)), FinishReason: "stop"}, nil
+}
+
+func TestSummarizeChunked(t *testing.T) {
+	// 对话远超预算 → 多次调用；每次 <conversation> 部分不超预算；后续调用带上一轮摘要
+	big := []Message{NewUser(strings.Repeat("这句话很长。", 20000))} // 序列化后 ~12 万字符
+	fake := &chunkLLM{}
+	got, err := summarize(context.Background(), fake, big, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(got, "摘要-") {
+		t.Fatalf("应返回最后一次摘要结果: %q", got)
+	}
+	if len(fake.prompts) < 2 {
+		t.Fatalf("长对话应分块多次摘要, got %d 次", len(fake.prompts))
+	}
+	for i, p := range fake.prompts {
+		// 每次调用里 <conversation> 段不超预算
+		start := strings.Index(p, "<conversation>\n") + len("<conversation>\n")
+		end := strings.LastIndex(p, "\n</conversation>")
+		if start < len("<conversation>\n") || end <= start {
+			t.Fatalf("第 %d 次 prompt 缺 conversation 段", i)
+		}
+		if n := len([]rune(p[start:end])); n > summarizeChunkChars {
+			t.Errorf("第 %d 次对话段 %d 字符超预算 %d", i, n, summarizeChunkChars)
+		}
+		if i > 0 && !strings.Contains(p, "摘要-"+strconv.Itoa(i)) {
+			t.Errorf("第 %d 次应携带上一轮摘要（链式增量）", i)
+		}
 	}
 }
 

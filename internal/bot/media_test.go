@@ -128,3 +128,34 @@ func TestUploadRichMediaNoToken(t *testing.T) {
 		t.Fatal("无 tokenSource 应报错")
 	}
 }
+
+func TestSendGroupVideo(t *testing.T) {
+	var gotFileType int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/files") {
+			var req struct {
+				FileType int    `json:"file_type"`
+				URL      string `json:"url"`
+			}
+			body, _ := io.ReadAll(r.Body)
+			_ = json.Unmarshal(body, &req)
+			gotFileType = req.FileType
+			fmt.Fprint(w, `{"file_info":"VINFO"}`)
+			return
+		}
+		fmt.Fprint(w, `{}`)
+	}))
+	defer srv.Close()
+	old := qqAPIBase
+	qqAPIBase = srv.URL
+	defer func() { qqAPIBase = old }()
+
+	b := &Bot{tokenSource: &fakeTS{tok: "t"}, appID: "A"}
+	info, err := b.uploadRichMedia(context.Background(), true, "G", 2, "https://x/v.mp4")
+	if err != nil || info != "VINFO" {
+		t.Fatalf("视频上传: %v %q", err, info)
+	}
+	if gotFileType != 2 {
+		t.Errorf("视频 file_type 应为 2, got %d", gotFileType)
+	}
+}

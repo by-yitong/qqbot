@@ -308,6 +308,9 @@ func main() {
 			plugins.WithGapFile(envOr("AGENT_GAP_MARKERS", "./data/gap_markers.json")),
 			plugins.WithImageHost(imgHost),
 			plugins.WithSteerAck(envInt("AGENT_STEER_ACK", 1) != 0))
+		// 短视频解析（注册在 Agent 之前：命中分享链接即 Abort，不触发 AI 兜底）。
+		b.UsePlugin(plugins.NewVideo(imgHost))
+
 		b.UsePlugin(agentPlug)
 
 		// .stop：停止当前会话正在进行的处理（与补充消息共用同一会话 key）。
@@ -369,7 +372,9 @@ func main() {
 					c.ReplyText("统计失败：" + err.Error())
 					return
 				}
-				c.ReplyText("今日：" + today.String() + "\n累计：" + total.String())
+				if _, err := c.ReplyMarkdown(usageMarkdown(today, total)); err != nil {
+					c.ReplyText("今日：" + today.String() + "\n累计：" + total.String())
+				}
 			}).Desc("查看 token 用量统计（今日/累计）").Alias("用量")
 		}
 
@@ -440,6 +445,43 @@ func main() {
 	if err := b.Run(ctx); err != nil && err != context.Canceled {
 		log.Fatalf("bot 退出: %v", err)
 	}
+}
+
+// usageMarkdown 把今日/累计用量渲染成 markdown（.usage 命令的展示层）。
+// 缓存命中率和输出速率只在有数据时展示，避免一堆 0。
+func usageMarkdown(today, total memory.UsageSummary) string {
+	var b strings.Builder
+	b.WriteString("**📊 Token 用量统计**\n\n")
+	b.WriteString("**今日**\n")
+	b.WriteString(usageLines(today))
+	b.WriteString("\n**累计**\n")
+	b.WriteString(usageLines(total))
+	return b.String()
+}
+
+func usageLines(u memory.UsageSummary) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "- 调用：%d 次\n", u.Calls)
+	fmt.Fprintf(&b, "- 输入：%s token\n", fmtTokMD(u.PromptTokens))
+	fmt.Fprintf(&b, "- 输出：%s token\n", fmtTokMD(u.CompletionTokens))
+	fmt.Fprintf(&b, "- 合计：%s token\n", fmtTokMD(u.TotalTokens))
+	if u.CacheSupported && u.PromptTokens > 0 {
+		fmt.Fprintf(&b, "- 缓存命中：%d%%\n", u.CachedTokens*100/u.PromptTokens)
+	}
+	if u.DurationMs > 0 && u.CompletionTokens > 0 {
+		fmt.Fprintf(&b, "- 平均输出：%d tok/s\n", u.CompletionTokens*1000/u.DurationMs)
+	}
+	return b.String()
+}
+
+func fmtTokMD(n int64) string {
+	if n >= 1_000_000 {
+		return fmt.Sprintf("%.2fM", float64(n)/1_000_000)
+	}
+	if n >= 10_000 {
+		return fmt.Sprintf("%.1f万", float64(n)/10_000)
+	}
+	return strconv.FormatInt(n, 10)
 }
 
 // parsePrefixes 把 ".|/" 解析成 []string。用 | 分隔：逗号在中英文/全角半角间太容易

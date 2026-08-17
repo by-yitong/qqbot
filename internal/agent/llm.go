@@ -32,6 +32,8 @@ func isOverflowResponse(statusCode int, body string) bool {
 	for _, kw := range []string{
 		"context_length_exceeded", "context length", "context_window",
 		"maximum context", "too many tokens", "reduce the length", "input is too long",
+		// 智谱 bigmodel 的措辞：{"error":{"code":"1261","message":"Prompt exceeds max length"}}
+		"exceeds max length", "prompt too long", "prompt is too long", "exceeds the context",
 	} {
 		if strings.Contains(b, kw) {
 			return true
