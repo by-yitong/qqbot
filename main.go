@@ -94,18 +94,26 @@ func main() {
 	)
 
 	// 自定义菜单 + 指令面板（官方 2026 新增接口，botgo 未覆盖，自行 HTTP 调用）：
-	// 内置默认配置（C2C 菜单 + 群面板），AGENT_MENU_CONFIG 指向的 menu.json 可覆盖；
+	// 默认按已注册命令自动生成（AutoMenuConfig，发布时取，命令已全部注册完），
+	// AGENT_MENU_CONFIG 指向的 menu.json 可整体覆盖；
 	// AGENT_MENU=1（默认）时启动自动发布，.menu 命令手动 apply/clear/查看。
-	menuCfg := bot.DefaultMenuConfig()
+	menuCfg, menuFromFile := bot.MenuConfig{}, false
 	if cfg, err := bot.LoadMenuConfig(envOr("AGENT_MENU_CONFIG", "./menu.json")); err != nil {
-		log.Printf("[main] 菜单配置加载失败（用内置默认）: %v", err)
+		log.Printf("[main] 菜单配置加载失败（用自动生成）: %v", err)
 	} else if cfg != nil {
 		menuCfg = *cfg
+		menuFromFile = true
 		log.Println("[main] 已加载菜单配置 menu.json")
+	}
+	getMenuCfg := func() bot.MenuConfig {
+		if menuFromFile {
+			return menuCfg
+		}
+		return b.AutoMenuConfig()
 	}
 	if envInt("AGENT_MENU", 1) != 0 {
 		b.OnStart(func(ctx context.Context) {
-			sum, err := b.ApplyMenus(ctx, menuCfg)
+			sum, err := b.ApplyMenus(ctx, getMenuCfg())
 			if err != nil {
 				log.Printf("[menu] 启动发布失败: %v", err)
 				return
@@ -116,7 +124,7 @@ func main() {
 	b.Command("menu", func(c *bot.Ctx) {
 		switch c.Args.Get(0) {
 		case "apply":
-			sum, err := b.ApplyMenus(c.Context, menuCfg)
+			sum, err := b.ApplyMenus(c.Context, getMenuCfg())
 			if err != nil {
 				c.ReplyText("发布失败：" + err.Error())
 				return

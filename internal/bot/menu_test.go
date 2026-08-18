@@ -265,3 +265,28 @@ func TestDefaultMenuConfigSanity(t *testing.T) {
 		}
 	}
 }
+
+func TestAutoMenuConfig(t *testing.T) {
+	b := &Bot{cmdIndex: map[string]*Command{}, prefixes: nil}
+	nop := func(*Ctx) {}
+	b.Command("帮助", nop).Desc("显示命令列表")
+	b.Command("ping", nop).Desc("测试在线").Alias("p")
+	b.Command("secret", nop).Desc("管理用").HideBotMenu()
+	b.Command("ghost", nop).Hidden()
+
+	cfg := b.AutoMenuConfig()
+	if len(cfg.Menu.Items) != 2 || len(cfg.Panels) != 1 || len(cfg.Panels[0].Panel.Items) != 2 {
+		t.Fatalf("应只收录 帮助/ping 两个命令: menu=%d panels=%v", len(cfg.Menu.Items), cfg.Panels)
+	}
+	if cfg.Menu.Items[0].SendMessage != "帮助" || cfg.Menu.Items[0].Type != "send_message" {
+		t.Errorf("菜单项应为 send_message 帮助: %+v", cfg.Menu.Items[0])
+	}
+	for _, it := range append(cfg.Menu.Items[:0:0], cfg.Menu.Items...) {
+		if it.SendMessage == "secret" || it.SendMessage == "ghost" {
+			t.Errorf("HideBotMenu/Hidden 命令不应进菜单: %q", it.SendMessage)
+		}
+	}
+	if cfg.Panels[0].Scope != "group" || cfg.Panels[0].Panel.Remark != AutoPanelRemark {
+		t.Errorf("群面板配置不对: %+v", cfg.Panels[0])
+	}
+}

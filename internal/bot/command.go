@@ -31,15 +31,16 @@ type scope struct {
 
 // Command 是一个已注册的命令。
 type Command struct {
-	name    string
-	aliases []string
-	desc    string
-	usage   string
-	hidden  bool
-	handler CommandHandler
-	mw      []Middleware
-	sc      scope
-	bot     *Bot
+	name        string
+	aliases     []string
+	desc        string
+	usage       string
+	hidden      bool
+	hideBotMenu bool
+	handler     CommandHandler
+	mw          []Middleware
+	sc          scope
+	bot         *Bot
 }
 
 // Desc 设置命令描述（用于 /help）。
@@ -57,6 +58,9 @@ func (c *Command) Alias(names ...string) *Command {
 
 // Hidden 让命令不出现在 /help 中。
 func (c *Command) Hidden() *Command { c.hidden = true; return c }
+
+// HideBotMenu 让命令不自动注册到 QQ bot 自定义菜单/指令面板（不影响 /help）。
+func (c *Command) HideBotMenu() *Command { c.hideBotMenu = true; return c }
 
 // Use 为该命令追加专属中间件（在作用域检查之后执行）。
 func (c *Command) Use(mw ...Middleware) *Command { c.mw = append(c.mw, mw...); return c }

@@ -242,6 +242,35 @@ func DefaultMenuConfig() MenuConfig {
 	}
 }
 
+// AutoMenuConfig 按当前已注册命令自动生成发布配置：每个非隐藏且未 HideBotMenu 的
+// 命令进 C2C 底部菜单（send_message，点击填入命令名）和群指令面板（command 项）。
+// 在发布时（OnStart / .menu apply）调用，保证所有命令都已注册完毕。
+func (b *Bot) AutoMenuConfig() MenuConfig {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	cfg := MenuConfig{}
+	panel := Panel{Remark: AutoPanelRemark}
+	for _, c := range b.cmds {
+		if c.hidden || c.hideBotMenu {
+			continue
+		}
+		if len(cfg.Menu.Items) < 10 { // 菜单上限 10 项
+			cfg.Menu.Items = append(cfg.Menu.Items, MenuItem{
+				Name: truncateStr(c.name, 10), Type: "send_message", SendMessage: c.name,
+			})
+		}
+		if len(panel.Items) < 20 { // 面板上限 20 项
+			panel.Items = append(panel.Items, PanelItem{
+				Type: "command", Name: truncateStr(c.name, 14), Desc: truncateStr(c.desc, 30),
+			})
+		}
+	}
+	if len(panel.Items) > 0 {
+		cfg.Panels = append(cfg.Panels, PanelReq{Scope: "group", TargetType: "all", Panel: panel})
+	}
+	return cfg
+}
+
 // LoadMenuConfig 从 JSON 文件加载发布配置；文件不存在返回 (nil, nil)（用内置默认）。
 func LoadMenuConfig(path string) (*MenuConfig, error) {
 	data, err := os.ReadFile(path)
