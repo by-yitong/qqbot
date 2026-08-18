@@ -220,7 +220,27 @@ b.GroupState(c.GroupID()).GetString("mode")
 
 ### 图床（QQ 发图必需）
 
-QQ 群/私聊的富媒体上传（`/v2/groups/{id}/files`）**简单 multipart 直传已废**——QQ 报 `850026 富媒体文件下载失败`，官方只支持「URL 模式」（给一个 url，QQ 自己下载）。所以需要一个**公网可达**的图床提供图片 URL。本项目自带一个极简图床服务 `cmd/imghost`：
+QQ 群/私聊的富媒体上传（`/v2/groups/{id}/files`）**简单 multipart 直传已废**——QQ 报 `850026 富媒体文件下载失败`，官方只支持「URL 模式」（给一个 url，QQ 自己下载）。所以需要一个**公网可达**的文件地址来源。两种模式，`.env` 切换：
+
+**模式 A：本地直存（推荐，bot 部署在公网服务器时）**
+
+bot 把文件直接写进本地目录 `IMGHOST_LOCAL_DIR`（默认建议 `./data/files`），返回 `IMGHOST_BASE_URL/<文件名>`。你用任意 web 服务（nginx/caddy/…）把该目录映射成公网可访问的路径即可，bot 进程自己不开端口：
+
+```nginx
+# nginx 示例：把 http://<公网IP>/files/ 映射到 bot 目录 data/files/
+location /files/ {
+    alias /home/xx/qqbot/data/files/;
+}
+```
+
+`.env`：
+```
+IMGHOST_BASE_URL=http://<公网IP或域名>/files   # 该目录的公网访问地址，不要带末尾 /
+IMGHOST_LOCAL_DIR=./data/files                  # 非空即启用本地直存模式
+```
+此模式 `IMGHOST_TOKEN` 不需要。文件永久保留（QQ 拉取时间不定，含视频代理最高可达 200MB/个），注意磁盘占用，必要时定期清理旧文件。
+
+**模式 B：远端图床 `cmd/imghost`（bot 在内网、图床单独部署时）**
 
 ```
 go build -o imghost ./cmd/imghost
@@ -229,9 +249,9 @@ go build -o imghost ./cmd/imghost
 
 配置（env）：`IMGHOST_LISTEN`（监听，默认 `:8088`）、`IMGHOST_BASE_URL`（**公网**基础 URL，如 `https://img.example.com`，构造返回的图片 URL）、`IMGHOST_TOKEN`（上传鉴权，仅 bot 上传用）、`IMGHOST_DIR`（存储目录）。`POST /upload`（Bearer 鉴权）→ 返回 `{"url":...}`；`GET /<id>.<ext>`（公开，QQ 下载）。防路径穿越、限单文件 20MB。
 
-> ⚠️ 部署：图床的 `GET` 地址 QQ 必须能从公网访问到；建议套 nginx/caddy 走 **HTTPS**（QQ 下载图片更稳，部分情况 HTTP 会被拒）。
+bot 侧 `.env`：`IMGHOST_BASE_URL`（图床公网地址）、`IMGHOST_TOKEN`（同上）、**不设 `IMGHOST_LOCAL_DIR`**。
 
-bot 侧配置（`.env`）：`IMGHOST_BASE_URL`（图床公网地址，与服务的 `IMGHOST_BASE_URL` 一致）、`IMGHOST_TOKEN`（同上）。两者填了，`generate_image` 就会把生成的图上传图床、返回公网 URL；不填则只在本地（QQ 发不出）。生成的图同时按 `IMG_SAVE_DIR`（默认 `./data/images`）本地归档一份。
+> ⚠️ 部署：文件的 `GET` 地址 QQ 必须能从公网访问到；建议套 nginx/caddy 走 **HTTPS**（QQ 下载图片更稳，部分情况 HTTP 会被拒）。两种模式下 `IMGHOST_BASE_URL` 都不填 → 生成的图只在本地（QQ 发不出），短视频代理退化为直链文本。生成的图同时按 `IMG_SAVE_DIR`（默认 `./data/images`）本地归档一份。
 
 ### 聊天记忆（长期，SQLite）
 

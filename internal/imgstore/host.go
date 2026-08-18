@@ -7,17 +7,24 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 )
 
-// Host 是远端图床客户端：把图片字节上传到图床服务，拿回一个公网 URL。
-// 配合 QQ 富媒体 URL 模式使用（QQ 自行下载该 URL）。
+// Host 是图床客户端：把文件字节变成一个 QQ 可拉取的公网 URL。两种模式：
+//   - 本地直存（Dir 非空）：写文件到 Dir/<id>.<ext>，返回 BaseURL/<文件名>。
+//     适合 bot 与 web 服务同机部署（如公网服务器上 nginx 直接映射该目录），
+//     此时 Token 不需要，BaseURL 填该目录的公网访问地址。
+//   - 远端上传（Dir 为空）：HTTP POST 到图床服务（cmd/imghost），向后兼容。
+//
 // BaseURL 为空表示未配置图床（调用方应回退到进程内 Store 的 genimg: 引用）。
 type Host struct {
-	BaseURL string       // 图床公网地址，如 https://img.example.com（不要带末尾 /）
-	Token   string       // 上传鉴权 token（与图床服务的 IMGHOST_TOKEN 一致）
-	HTTP    *http.Client // nil 则用默认 30s 客户端
+	BaseURL string       // 公网基础 URL，如 https://img.example.com（不要带末尾 /）
+	Token   string       // 远端模式上传鉴权 token；本地直存模式不需要
+	Dir     string       // 本地直存目录（如 ./data/files）；非空启用本地直存模式
+	HTTP    *http.Client // 远端模式用；nil 则用默认 30s 客户端
 }
 
 // Configured 报告图床是否已配置（BaseURL 非空）。
@@ -25,12 +32,16 @@ func (h *Host) Configured() bool {
 	return h != nil && strings.TrimSpace(h.BaseURL) != ""
 }
 
-// Upload 把图片字节上传到图床，返回公网 URL。ext 可带或不带点（空默认 png）。
+// Upload 把文件字节变成公网 URL：本地直存模式写盘，远端模式 POST 图床。
+// ext 可带或不带点（空默认 png）。文件永久保留（QQ 拉取时间不定），不做 TTL。
 func (h *Host) Upload(ctx context.Context, data []byte, ext string) (string, error) {
 	if !h.Configured() {
 		return "", fmt.Errorf("图床未配置（IMGHOST_BASE_URL 为空）")
 	}
 	ext = normalizeExt(ext)
+	if h.Dir != "" {
+		return h.saveLocal(data, ext)
+	}
 	endpoint := strings.TrimRight(h.BaseURL, "/") + "/upload?ext=" + ext
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(data))
@@ -64,6 +75,18 @@ func (h *Host) Upload(ctx context.Context, data []byte, ext string) (string, err
 		return "", fmt.Errorf("图床响应无 url: %s", truncStr(string(body), 300))
 	}
 	return res.URL, nil
+}
+
+// saveLocal 本地直存：写 Dir/<id>.<ext>，返回 BaseURL/<文件名>。
+func (h *Host) saveLocal(data []byte, ext string) (string, error) {
+	if err := os.MkdirAll(h.Dir, 0o755); err != nil {
+		return "", fmt.Errorf("创建直存目录 %s 失败: %w", h.Dir, err)
+	}
+	name := randID() + "." + ext
+	if err := os.WriteFile(filepath.Join(h.Dir, name), data, 0o644); err != nil {
+		return "", fmt.Errorf("直存写盘失败: %w", err)
+	}
+	return strings.TrimRight(h.BaseURL, "/") + "/" + name, nil
 }
 
 func truncStr(s string, n int) string {

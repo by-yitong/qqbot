@@ -5,6 +5,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -80,5 +82,39 @@ func TestHostUploadNoURL(t *testing.T) {
 	h := &Host{BaseURL: srv.URL}
 	if _, err := h.Upload(context.Background(), []byte("x"), "png"); err == nil {
 		t.Fatal("无 url 应报错")
+	}
+}
+
+func TestHostUploadLocal(t *testing.T) {
+	dir := t.TempDir()
+	h := &Host{BaseURL: "http://162.example.com/files", Dir: dir}
+
+	url, err := h.Upload(context.Background(), []byte("videobytes"), "mp4")
+	if err != nil {
+		t.Fatal(err)
+	}
+	name := strings.TrimPrefix(url, "http://162.example.com/files/")
+	if !strings.HasSuffix(name, ".mp4") || len(name) != len("1234567890abcdef.mp4") {
+		t.Fatalf("文件名应为 <16位id>.mp4: %q", name)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, name))
+	if err != nil || string(data) != "videobytes" {
+		t.Fatalf("落盘内容不符: %v %q", err, data)
+	}
+
+	// 空扩展名默认 png
+	u2, err := h.Upload(context.Background(), []byte("img"), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasSuffix(u2, ".png") {
+		t.Errorf("空 ext 应默认 png: %q", u2)
+	}
+}
+
+func TestHostUploadLocalUnconfigured(t *testing.T) {
+	h := &Host{Dir: t.TempDir()} // BaseURL 空 = 未配置
+	if _, err := h.Upload(context.Background(), []byte("x"), "png"); err == nil {
+		t.Fatal("BaseURL 为空应报未配置")
 	}
 }

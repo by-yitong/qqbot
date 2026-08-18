@@ -195,9 +195,12 @@ func main() {
 
 		// 图床（QQ 富媒体是 URL 模式，本地图片都得经它转公网 URL）：
 		// 生图工具、send_image 的本地文件（如浏览器截图）共用。
+		// 两种模式 .env 切换：IMGHOST_LOCAL_DIR 非空 → 本地直存（写盘 + BaseURL 拼公网地址，
+		// 适合 bot 与 web 服务同机，如公网服务器 nginx 映射该目录）；为空 → 远端图床上传。
 		imgHost := &imgstore.Host{
 			BaseURL: envOr("IMGHOST_BASE_URL", ""),
 			Token:   envOr("IMGHOST_TOKEN", ""),
+			Dir:     envOr("IMGHOST_LOCAL_DIR", ""),
 		}
 
 		// 生图（OpenAI 协议，文生图/图生图）；有 IMAGE_API_KEY 才注册。
@@ -216,7 +219,11 @@ func main() {
 			reg.Register(&tools.GenerateImage{Owner: imgen})
 			hostMsg := "无图床（生成的图仅本地，QQ 发不出）"
 			if imgen.ImageHost.Configured() {
-				hostMsg = "图床 " + imgen.ImageHost.BaseURL
+				if imgen.ImageHost.Dir != "" {
+					hostMsg = "本地直存 " + imgen.ImageHost.Dir + " → " + imgen.ImageHost.BaseURL
+				} else {
+					hostMsg = "远端图床 " + imgen.ImageHost.BaseURL
+				}
 			}
 			log.Println("[main] 已启用生图工具，模型: " + imgen.Model + "，" + hostMsg + "，归档: " + envOr("IMG_SAVE_DIR", "./data/images"))
 		}
