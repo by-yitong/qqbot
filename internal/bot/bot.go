@@ -309,6 +309,8 @@ func (b *Bot) onGroupMessage(_ *dto.WSPayload, msg []byte) error {
 
 // extractQuote 从群消息的 msg_elements 提取被引用消息的文本（引用回复场景）。
 // 普通消息没有 msg_elements，返回空。
+// 附件（文件/图片等）没有 content，只有 attachments：把文件名 + 下载 URL 也拼进去，
+// 否则「看下这个」+ 引用一个文件时 agent 看不到任何内容（URL 可经 httpget 工具下载）。
 func extractQuote(msg []byte) string {
 	var sb strings.Builder
 	gjson.GetBytes(msg, "d.msg_elements").ForEach(func(_, el gjson.Result) bool {
@@ -318,6 +320,17 @@ func extractQuote(msg []byte) string {
 			}
 			sb.WriteString(c)
 		}
+		el.Get("attachments").ForEach(func(_, att gjson.Result) bool {
+			fn, url := att.Get("filename").String(), att.Get("url").String()
+			if fn == "" && url == "" {
+				return true
+			}
+			if sb.Len() > 0 {
+				sb.WriteString("\n")
+			}
+			sb.WriteString("[被引用消息的附件] " + fn + "\n" + url)
+			return true
+		})
 		return true
 	})
 	return strings.TrimSpace(sb.String())

@@ -206,7 +206,11 @@ func (p *AgentPlugin) handle(c *bot.Ctx) {
 	question := strings.TrimSpace(text)
 	images := c.Images()
 	if question == "" && len(images) == 0 {
-		return // 既无文本也无图片，不处理
+		// 群里只 @ 机器人不说话：仍触发 agent，让它根据历史消息自然接话。
+		if !c.IsGroup() || !c.AtBot() {
+			return // 既无文本也无图片（且不是群 @），不处理
+		}
+		question = "（用户只是 @ 了你，没有说别的。请根据最近的群聊历史自然地回应，比如接上之前的话题或简短打个招呼，不要提示对方没有输入内容。）"
 	}
 	// 说话人标注：群聊正文前加 [昵称]（模型分清谁在说；也随 session 落盘，历史可追溯）。
 	if c.IsGroup() && c.Username() != "" {

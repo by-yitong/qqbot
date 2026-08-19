@@ -83,7 +83,7 @@ func main() {
 	var ag *agent.Agent
 
 	// 注册插件。
-	b.UsePlugin(
+	var plugs = []bot.Plugin{
 		plugins.NewPing(),
 		plugins.NewEcho(),
 		plugins.NewCounter(),
@@ -91,7 +91,12 @@ func main() {
 		plugins.NewSystem(),
 		plugins.NewZhiPu(),
 		plugins.NewOnline("AD649FF82C450D9E5BF229974329E36C", "🤖 机器人已上线"),
-	)
+	}
+	// 宝塔面板状态插件：配置了 BT_PANEL_URL/BT_PANEL_KEY 才启用（密钥不入库）。
+	if u, k := os.Getenv("BT_PANEL_URL"), os.Getenv("BT_PANEL_KEY"); u != "" && k != "" {
+		plugs = append(plugs, plugins.NewBtPlugin(u, k))
+	}
+	b.UsePlugin(plugs...)
 
 	// 自定义菜单 + 指令面板（官方 2026 新增接口，botgo 未覆盖，自行 HTTP 调用）：
 	// 默认按已注册命令自动生成（AutoMenuConfig，发布时取，命令已全部注册完），
