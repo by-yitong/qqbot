@@ -2,6 +2,8 @@ package plugins
 
 import (
 	"fmt"
+	"log"
+	"os"
 	"strings"
 	"time"
 
@@ -17,6 +19,16 @@ type BtPlugin struct {
 // NewBtPlugin 创建宝塔面板插件；baseURL/apiKey 为面板接口地址与密钥。
 func NewBtPlugin(baseURL, apiKey string) *BtPlugin {
 	return &BtPlugin{panel: bt.NewBtPanel(baseURL, apiKey)}
+}
+
+// NewBtFromEnv 读 BT_PANEL_URL/BT_PANEL_KEY 构造；未配置返回 nil（不注册，密钥不入库）。
+func NewBtFromEnv() bot.Plugin {
+	u, k := os.Getenv("BT_PANEL_URL"), os.Getenv("BT_PANEL_KEY")
+	if u == "" || k == "" {
+		return nil
+	}
+	log.Println("[bt] 已启用宝塔面板状态插件 /panel")
+	return NewBtPlugin(u, k)
 }
 
 // Install 注册命令。

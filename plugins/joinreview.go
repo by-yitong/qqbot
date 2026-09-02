@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -12,6 +13,7 @@ import (
 
 	"qqbot/internal/agent"
 	"qqbot/internal/bot"
+	"qqbot/internal/utils"
 )
 
 // JoinReview 入群申请自动审批：收到 GROUP_JOIN_REQUEST 事件后核对申请人的验证答案，
@@ -87,6 +89,50 @@ func (p *JoinReview) WithAI(c llmCompleter, rule string) *JoinReview {
 	}
 	p.AIRule = rule
 	return p
+}
+
+// NewJoinReviewFromEnv 读 JOIN_REVIEW_* 变量构造入群申请自动审批插件。
+// 配了 JOIN_REVIEW_ANSWERS（| 分隔）或 JOIN_REVIEW_MATCH=ai 才启用，否则返回 nil。
+// 匹配模式：exact 精确 / contains 关键词包含 / ai 把问题与回答交给 LLM 判对错
+//（问答模式的事件自带群设置的问题原文，多群零配置；纯验证消息模式用
+// JOIN_REVIEW_AI_RULE 给全局判定标准；AI 失败回退关键词再留人工）。
+// 判定不通过默认留人工（JOIN_REVIEW_DECLINE=1 改为自动拒绝）。
+// 机器人需是群管理员才能收到申请事件；/审批 命令可人工查看与处理。
+func NewJoinReviewFromEnv() bot.Plugin {
+	match := utils.EnvOr("JOIN_REVIEW_MATCH", "exact")
+	if match != JoinMatchAI && os.Getenv("JOIN_REVIEW_ANSWERS") == "" {
+		return nil
+	}
+	jr := NewJoinReview(parseJoinAnswers(os.Getenv("JOIN_REVIEW_ANSWERS")), match,
+		utils.EnvInt("JOIN_REVIEW_DECLINE", 0) == 1,
+		utils.SplitList(os.Getenv("JOIN_REVIEW_GROUPS")),
+		utils.SplitList(os.Getenv("JOIN_ADMINS")))
+	if match == JoinMatchAI {
+		if key := os.Getenv("AI_API_KEY"); key != "" {
+			jr.WithAI(agent.NewLLMClient(
+				utils.EnvOr("AI_BASE_URL", "https://api.deepseek.com/v1"), key,
+				utils.EnvOr("AI_MODEL", "deepseek-chat")),
+				utils.EnvOr("JOIN_REVIEW_AI_RULE", ""))
+			log.Println("[joinreview] 已启用入群申请自动审批（AI 判定）")
+		} else {
+			log.Println("[joinreview] JOIN_REVIEW_MATCH=ai 但未配置 AI_API_KEY，AI 判定不生效（关键词兜底/留人工）")
+		}
+	} else {
+		log.Printf("[joinreview] 已启用入群申请自动审批（匹配模式 %s）", match)
+	}
+	return jr
+}
+
+// parseJoinAnswers 把 "答案1|答案2" 解析成 []string（入群审批的正确答案集合）。
+// 用 | 分隔，避免中文答案里的逗号歧义。
+func parseJoinAnswers(s string) []string {
+	var out []string
+	for _, a := range strings.Split(s, "|") {
+		if a = strings.TrimSpace(a); a != "" {
+			out = append(out, a)
+		}
+	}
+	return out
 }
 
 // joinApprover 是 review 需要的审批能力（*bot.Bot 天然满足；测试用假实现注入）。

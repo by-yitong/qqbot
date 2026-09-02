@@ -20,6 +20,7 @@ import (
 	"github.com/tidwall/gjson"
 
 	"qqbot/internal/bot"
+	"qqbot/internal/utils"
 )
 
 // Webhook 是飞书式 webhook 插件：外部系统 POST 一个地址，bot 把内容主动发到对应群。
@@ -57,6 +58,20 @@ type webhookConf struct {
 // NewWebhook 创建插件。file 是配置落盘路径；listenAddr 空 = 不启 HTTP 服务（只留命令）。
 func NewWebhook(file, listenAddr, baseURL string) *Webhook {
 	return &Webhook{file: file, listenAddr: listenAddr, baseURL: baseURL, lastGroup: map[string]string{}}
+}
+
+// NewWebhookFromEnv 读 WEBHOOK_LISTEN 等变量构造；未配监听地址返回 nil（不注册）。
+// /webhook 仅主人可用（BOT_OWNERS）；没配主人 = 命令谁都用不了，这里提醒一句。
+func NewWebhookFromEnv() bot.Plugin {
+	addr := utils.EnvOr("WEBHOOK_LISTEN", "")
+	if addr == "" {
+		return nil
+	}
+	log.Println("[webhook] 已启用 webhook 推送，监听 " + addr)
+	if len(utils.SplitList(os.Getenv("BOT_OWNERS"))) == 0 {
+		log.Println("[webhook] ⚠️ 未配置 BOT_OWNERS：/webhook 命令将对所有人拒绝（用 /id 查 openid 后配置）")
+	}
+	return NewWebhook(utils.EnvOr("WEBHOOK_FILE", "./data/webhook.json"), addr, utils.EnvOr("WEBHOOK_BASE_URL", ""))
 }
 
 // Install 加载配置、注册命令与 HTTP 服务。

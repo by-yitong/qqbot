@@ -27,12 +27,10 @@ import (
 
 	"github.com/joho/godotenv"
 
-	"qqbot/internal/agent"
 	"qqbot/internal/bot"
 	"qqbot/internal/memory"
 	"qqbot/internal/scheduler"
 	"qqbot/internal/utils"
-	"qqbot/pkg/imgbed"
 	"qqbot/plugins"
 )
 
@@ -97,8 +95,13 @@ func main() {
 	sched := scheduler.New(utils.EnvOr("TASK_FILE", "./data/tasks.json"), tz,
 		utils.EnvInt("TASK_MAX_PER_CHAT", 0), utils.EnvInt("TASK_MAX_TOTAL", 0))
 
-	// 注册插件。
-	var plugs = []bot.Plugin{
+	// 注册插件。带 FromEnv 后缀的构造器各自读环境变量决定是否启用（未配置返回
+	// nil，UsePlugin 跳过），启停条件与日志收在插件文件里，main 只保留这张清单。
+	//
+	// 图床上传：「/图床」命令插件 + agent 的 upload_image 工具（自然语言
+	//「把这张图传图床」）共用同一个 client，所以 FromEnv 把 client 也返回出来。
+	imgbedPlug, imgbedCli, imgbedMax := plugins.NewImgbedFromEnv()
+	b.UsePlugin(
 		plugins.NewPing(),
 		plugins.NewWhois(),
 		plugins.NewEcho(),
@@ -107,65 +110,12 @@ func main() {
 		plugins.NewSystem(),
 		plugins.NewZhiPu(),
 		plugins.NewOnline("AD649FF82C450D9E5BF229974329E36C", "🤖 机器人已上线"),
-	}
-	// 宝塔面板状态插件：配置了 BT_PANEL_URL/BT_PANEL_KEY 才启用（密钥不入库）。
-	if u, k := os.Getenv("BT_PANEL_URL"), os.Getenv("BT_PANEL_KEY"); u != "" && k != "" {
-		plugs = append(plugs, plugins.NewBtPlugin(u, k))
-	}
-	// 图床上传：配置了 IMGBED_TOKEN 才启用。「/图床」命令插件 + agent 的
-	// upload_image 工具（自然语言「把这张图传图床」）共用同一个 client。
-	var imgbedCli *imgbed.Client
-	var imgbedMax int64
-	if tok := os.Getenv("IMGBED_TOKEN"); tok != "" {
-		base := utils.EnvOr("IMGBED_BASE_URL", "https://imgbed.jmwl.dpdns.org")
-		imgbedCli = &imgbed.Client{BaseURL: base, Token: tok}
-		imgbedMax = int64(utils.EnvInt("IMGBED_MAX_MB", 10)) << 20
-		plugs = append(plugs, plugins.NewImgbed(imgbedCli, imgbedMax))
-		log.Println("[main] 已启用图床上传 /图床 → " + base)
-	}
-	// Webhook 推送插件：群内 /webhook 生成推送地址，外部 POST 消息进群；
-	// WEBHOOK_LISTEN 配置才启 HTTP 服务（地址前缀用 WEBHOOK_BASE_URL，如 http://xxxx.cn）。
-	// /webhook 仅主人可用（BOT_OWNERS）；没配主人 = 命令谁都用不了，这里提醒一句。
-	if addr := utils.EnvOr("WEBHOOK_LISTEN", ""); addr != "" {
-		plugs = append(plugs, plugins.NewWebhook(utils.EnvOr("WEBHOOK_FILE", "./data/webhook.json"), addr, utils.EnvOr("WEBHOOK_BASE_URL", "")))
-		log.Println("[main] 已启用 webhook 推送，监听 " + addr)
-		if len(utils.SplitList(os.Getenv("BOT_OWNERS"))) == 0 {
-			log.Println("[main] ⚠️ 未配置 BOT_OWNERS：/webhook 命令将对所有人拒绝（用 /id 查 openid 后配置）")
-		}
-	}
-	// 入群欢迎：WELCOME_TEXT 配置才启用（{name} → 新成员昵称，昵称取不到用「新朋友」）。
-	// 欢迎语是主动消息（入群事件无回复锚点），需在 q.qq.com 开通主动消息权限。
-	if wtxt := utils.EnvOr("WELCOME_TEXT", ""); wtxt != "" {
-		plugs = append(plugs, plugins.NewWelcome(wtxt, utils.SplitList(os.Getenv("WELCOME_GROUPS"))))
-		log.Println("[main] 已启用入群欢迎")
-	}
-	// 入群申请自动审批：配了 JOIN_REVIEW_ANSWERS（| 分隔）或 JOIN_REVIEW_MATCH=ai 即启用。
-	// 匹配模式：exact 精确 / contains 关键词包含 / ai 把问题与回答交给 LLM 判对错
-	//（问答模式的事件自带群设置的问题原文，多群零配置；纯验证消息模式用
-	// JOIN_REVIEW_AI_RULE 给全局判定标准；AI 失败回退关键词再留人工）。
-	// 判定不通过默认留人工（JOIN_REVIEW_DECLINE=1 改为自动拒绝）。
-	// 机器人需是群管理员才能收到申请事件；/审批 命令可人工查看与处理。
-	if match := utils.EnvOr("JOIN_REVIEW_MATCH", "exact"); match == plugins.JoinMatchAI || os.Getenv("JOIN_REVIEW_ANSWERS") != "" {
-		jr := plugins.NewJoinReview(parseAnswers(os.Getenv("JOIN_REVIEW_ANSWERS")), match,
-			utils.EnvInt("JOIN_REVIEW_DECLINE", 0) == 1,
-			utils.SplitList(os.Getenv("JOIN_REVIEW_GROUPS")),
-			utils.SplitList(os.Getenv("JOIN_ADMINS")))
-		if match == plugins.JoinMatchAI {
-			if key := os.Getenv("AI_API_KEY"); key != "" {
-				jr.WithAI(agent.NewLLMClient(
-					utils.EnvOr("AI_BASE_URL", "https://api.deepseek.com/v1"), key,
-					utils.EnvOr("AI_MODEL", "deepseek-chat")),
-					utils.EnvOr("JOIN_REVIEW_AI_RULE", ""))
-				log.Println("[main] 已启用入群申请自动审批（AI 判定）")
-			} else {
-				log.Println("[main] JOIN_REVIEW_MATCH=ai 但未配置 AI_API_KEY，AI 判定不生效（关键词兜底/留人工）")
-			}
-		} else {
-			log.Printf("[main] 已启用入群申请自动审批（匹配模式 %s）", match)
-		}
-		plugs = append(plugs, jr)
-	}
-	b.UsePlugin(plugs...)
+		plugins.NewBtFromEnv(),
+		imgbedPlug,
+		plugins.NewWebhookFromEnv(),
+		plugins.NewWelcomeFromEnv(),
+		plugins.NewJoinReviewFromEnv(),
+	)
 
 	installMenu(b)
 
@@ -276,18 +226,6 @@ func parsePrefixes(s string) []string {
 	for _, p := range strings.Split(s, "|") {
 		if p = strings.TrimSpace(p); p != "" {
 			out = append(out, p)
-		}
-	}
-	return out
-}
-
-// parseAnswers 把 "答案1|答案2" 解析成 []string（入群审批的正确答案集合）。
-// 同 parsePrefixes 用 | 分隔，避免中文答案里的逗号歧义。
-func parseAnswers(s string) []string {
-	var out []string
-	for _, a := range strings.Split(s, "|") {
-		if a = strings.TrimSpace(a); a != "" {
-			out = append(out, a)
 		}
 	}
 	return out

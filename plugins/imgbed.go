@@ -3,11 +3,14 @@ package plugins
 import (
 	"context"
 	"fmt"
+	"log"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
 	"qqbot/internal/bot"
+	"qqbot/internal/utils"
 	"qqbot/pkg/imgbed"
 )
 
@@ -25,6 +28,21 @@ type Imgbed struct {
 // NewImgbed 创建插件。maxBytes 是单图大小上限（<=0 默认 10MB）。
 func NewImgbed(cli *imgbed.Client, maxBytes int64) *Imgbed {
 	return &Imgbed{cli: cli, maxBytes: maxBytes, fetch: &http.Client{Timeout: 30 * time.Second}}
+}
+
+// NewImgbedFromEnv 读 IMGBED_TOKEN 等变量构造「/图床」命令插件；未配 token 返回 nil 插件。
+// 返回的 cli/maxBytes 同时供 agent 的 upload_image 工具复用（自然语言「把这张图传图床」），
+// 未配置时 cli 为 nil。
+func NewImgbedFromEnv() (p bot.Plugin, cli *imgbed.Client, max int64) {
+	tok := os.Getenv("IMGBED_TOKEN")
+	if tok == "" {
+		return nil, nil, 0
+	}
+	base := utils.EnvOr("IMGBED_BASE_URL", "https://imgbed.jmwl.dpdns.org")
+	cli = &imgbed.Client{BaseURL: base, Token: tok}
+	max = int64(utils.EnvInt("IMGBED_MAX_MB", 10)) << 20
+	log.Println("[imgbed] 已启用图床上传 /图床 → " + base)
+	return NewImgbed(cli, max), cli, max
 }
 
 // Install 注册命令。

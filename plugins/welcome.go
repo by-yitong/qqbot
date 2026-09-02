@@ -3,11 +3,13 @@ package plugins
 import (
 	"context"
 	"log"
+	"os"
 	"strings"
 	"sync"
 	"time"
 
 	"qqbot/internal/bot"
+	"qqbot/internal/utils"
 )
 
 // Welcome 入群欢迎：收到 GROUP_MEMBER_ADD（新成员入群）后往群里发一条欢迎消息。
@@ -41,6 +43,17 @@ const nameCacheCap = 2000
 // NewWelcome 构造入群欢迎插件。text 里的 {name} 会替换成新成员昵称。
 func NewWelcome(text string, groups []string) *Welcome {
 	return &Welcome{Text: text, Groups: groups, names: map[string]string{}}
+}
+
+// NewWelcomeFromEnv 读 WELCOME_TEXT/WELCOME_GROUPS 构造；未配欢迎语返回 nil（不注册）。
+// 欢迎语是主动消息（入群事件无回复锚点），需在 q.qq.com 开通主动消息权限。
+func NewWelcomeFromEnv() bot.Plugin {
+	wtxt := utils.EnvOr("WELCOME_TEXT", "")
+	if wtxt == "" {
+		return nil
+	}
+	log.Println("[welcome] 已启用入群欢迎")
+	return NewWelcome(wtxt, utils.SplitList(os.Getenv("WELCOME_GROUPS")))
 }
 
 // rememberName 记录入群申请里的昵称（入群事件无昵称，审批通过后成员入群时取用）。
