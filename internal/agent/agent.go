@@ -25,6 +25,7 @@ type Config struct {
 	CompactionThreshold int           // token 估算阈值，>0 才启用压缩，默认 0(关)
 	KeepRecent          int           // 压缩时保留的近期消息条数，默认 10
 	Skills              []Skill       // 注入 system 的技能（SKILL.md）
+	SkillsDir           string        // 技能落盘目录（skill_create 写到这里，空 = 创建的技能不持久化）
 	RuntimeMCPCfg       string        // 运行时添加的 MCP server 持久化文件（空 = 不持久化）
 }
 
@@ -83,6 +84,9 @@ func (a *Agent) Run(ctx context.Context, userID, userText string, opts ...RunOpt
 		// 让工具（如 send_image）能经 ResponderFrom 取到当前会话的 responder。
 		loopCtx = context.WithValue(loopCtx, responderKey{}, o.responder)
 	}
+	// 本次输入的图片 URL（upload_image 等工具经 ImagesFromContext 取用）。
+	// 多模态请求里模型只「看图」看不到 URL 字符串，必须走 ctx 传递。
+	loopCtx = context.WithValue(loopCtx, imagesKey{}, o.images)
 
 	// 注册运行 handle（Steer/Interrupt 的入口）；defer 注销。
 	h := a.startRun(userID, cancelRun)
@@ -105,7 +109,7 @@ func (a *Agent) Run(ctx context.Context, userID, userText string, opts ...RunOpt
 	if o.persistBlk != "" {
 		msgs = append(msgs, NewUser(o.persistBlk))
 	}
-	msgs = append(msgs, NewUser(userText))
+	msgs = append(msgs, NewUserWithImages(userText, o.images))
 
 	var lastReply string
 	var overflowCompacted bool // 每次 Run 至多做一次溢出压缩+重试，防死循环
@@ -113,9 +117,7 @@ func (a *Agent) Run(ctx context.Context, userID, userText string, opts ...RunOpt
 	for {
 		// turn 边界：注入运行中补充的消息（steering）。用户主动补充重置迭代预算。
 		if steered := h.drainSteer(); len(steered) > 0 {
-			for _, s := range steered {
-				msgs = append(msgs, NewUser(s))
-			}
+			msgs = append(msgs, steered...)
 			iter = 0
 		}
 		if err := loopCtx.Err(); err != nil {

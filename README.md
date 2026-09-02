@@ -6,9 +6,9 @@
 - **WSS 出站**：机器人主动连接腾讯（内网/NAT 友好，无需公网 HTTPS）。
 - **插件框架** `internal/bot`：写功能只关心业务，handler 收一个 `*bot.Ctx`。
 - **agent harness** `internal/agent`：未命中命令的消息交给一个可调工具、有记忆、能压缩上下文的 agent（设计参考 [pi](https://github.com/earendil-works/pi) 的 coding-agent）。
-- 示例插件：`ping` / `echo` / `counter`（会话状态）/ `happy`（HTTP+gjson）/ `agent`（未命中命令时 agent 兜底）。
+- 示例插件：`ping`（在线检测 / 真实 ping）/ `whois`（域名注册信息直查）/ `echo` / `counter`（会话状态）/ `happy`（HTTP+gjson）/ `agent`（未命中命令时 agent 兜底）。
 
-> ⚠️ 官方机器人约束：**只能被动回复**（收到消息后 5 分钟内回复）、**用户/群 ID 是 openid（不是 QQ 号）**、**没有群管接口**（踢人/禁言等）。上线通知、入群欢迎、主动推送等无法实现。
+> ⚠️ 官方机器人约束：**只能被动回复**（收到消息后 5 分钟内回复）、**用户/群 ID 是 openid（不是 QQ 号）**、踢人等群管仍无官方接口。主动推送（上线通知、入群欢迎等）需在 q.qq.com 开通**主动消息**权限。官方 2026-08 起新增了**群成员入群事件、入群申请事件与审批接口**，入群欢迎/自动审批已可用（见下文「入群欢迎与自动审批」）。
 >
 > 群消息：默认只收 @ 消息（`GROUP_AT_MESSAGE_CREATE`）；在 q.qq.com 开通**全量群消息**权限后可收 `GROUP_MESSAGE_CREATE`（无需 @，本框架已支持两者）。
 
@@ -16,7 +16,8 @@
 
 ```
 qqbot/
-├── main.go                  # 装配：读 .env → bot.New → 注册插件 → 装配 agent → Run
+├── main.go                  # 装配主干：读 .env → bot.New → 注册插件 → agent 装配 → Run
+├── setup.go                 # agent 装配（工具注册 / MCP / LLM 主备熔断 / 配套插件）
 ├── cmd/imghost/             # 图床服务（独立二进制，部署到公网服务器；给 QQ URL 模式发图用）
 ├── internal/
 │   ├── bot/                 # 插件框架（基于 botgo）
@@ -25,6 +26,8 @@ qqbot/
 │   │   ├── command.go       # Command / Args / 命令匹配 / 作用域 / Help
 │   │   ├── handler.go       # 处理器/中间件类型、监听器、Plugin、Use/UsePlugin
 │   │   ├── media.go         # 发图：下载→上传富媒体→MsgType=7（支持 genimg: 图床引用）
+│   │   ├── groupevent.go    # 群成员入群/入群申请事件（GROUP_MEMBER_ADD / GROUP_JOIN_REQUEST）
+│   │   ├── groupmanage.go   # 入群申请审批/列表接口（approval_join_request / join_request_list）
 │   │   ├── state.go         # 会话状态（按 openid 的 KV）
 │   │   └── doc.go           # 包文档
 │   ├── agent/               # agent harness（工具循环 / 记忆 / 压缩 / 技能 / MCP）
@@ -40,8 +43,8 @@ qqbot/
 │   ├── imgstore/            # 进程内图床（genimg: 引用 + TTL/容量淘汰 + 落盘归档）+ 远端图床客户端 Host
 │   ├── memory/              # 长期记忆（SQLite/GORM）：全量落库(异步+去重) / 检索 / 近期动态（群隔离）
 │   ├── scheduler/           # 定时任务（结构化计划 daily/weekly/interval/once + 落盘重启恢复 + 到点回调）
-│   └── utils/               # HTTP 工具（共享 resty 客户端 + gjson）
-├── plugins/                 # 插件（ping/echo/counter/happy/system/zhipu/tasks/online/agent/recorder）
+│   └── utils/               # 通用工具（共享 resty 客户端 + gjson + env 读取辅助）
+├── plugins/                 # 插件（ping/whois/echo/counter/happy/system/zhipu/tasks/online/agent/recorder/session 会话命令/welcome 入群欢迎/joinreview 入群审批）
 ├── skills/                  # 放 SKILL.md（技能，懒加载注入 agent system prompt 索引）
 ├── mcp.json.example         # MCP server 配置示例（复制为 mcp.json）
 ├── menu.json.example        # 自定义菜单/指令面板配置示例（复制为 menu.json；不复制用内置默认）
@@ -64,6 +67,7 @@ go run .
 QQBOT_APP_ID=你的 AppID
 QQBOT_APP_SECRET=你的 AppSecret
 BOT_PREFIXES=/                # 命令前缀（可选，多个用 | 分隔）
+BOT_OWNERS=                   # 主人 openid（逗号分隔）：/webhook 等 OwnerOnly 命令仅主人可用
 AI_API_KEY=                   # 配置则启用 agent 兜底（工具循环/多轮记忆/压缩/技能/MCP）
 ```
 
@@ -128,13 +132,16 @@ b.Run(ctx)
 ### 命令
 ```go
 b.Command("echo", echo).
-	Desc("复读一句话").   // 进 /help
+	Desc("复读一句话").        // 进 /help
 	Usage("/echo <文本>").
-	Alias("say").        // 别名
-	Hidden().            // 不出现在 /help
-	GroupOnly()          // 作用域：GroupOnly/PrivateOnly/ChannelOnly
+	Alias("say").             // 别名
+	Hidden().                 // 不出现在 /help
+	RequireAtOrPrefix().      // 必须带前缀或 @机器人 才触发（默认关：裸文本也可命中）
+	OwnerOnly().              // 仅主人可用（BOT_OWNERS 配置的 openid；不配置 = 无人可用）
+	GroupOnly()               // 作用域：GroupOnly/PrivateOnly/ChannelOnly
 ```
-- 命令触发：群消息需 @（官方强制），命中后**可选**前缀去掉再匹配；私聊直接匹配。命中命令后不再触发关键词/监听器。
+- 命令触发：**默认裸文本也可命中**——发送 `xxx` 等价 `.xxx`（群里不用 @ 不用前缀，指令面板/免前缀直达都靠它）。`.RequireAtOrPrefix()` 可收紧成必须前缀或 @（名字是常用词、易被群聊误触的命令建议收紧；AI 兜底不走命令表，群消息本来就要求 @ 或前缀）。命中命令后不再触发关键词/监听器。
+- **主人权限**：`bot.New` 时 `bot.WithOwners(openid...)`（`.env` 配 `BOT_OWNERS`，逗号分隔）设定主人；`.OwnerOnly()` 的命令仅主人可用（如 `/webhook`），且不进非主人视角的 `/help` 与自动菜单/面板（面板对所有用户可见）。fail-closed：不配置主人则这类命令对所有人拒绝。`c.IsOwner()` 可在任意 handler 里判断发送者是否主人；自己的 openid 用 `/id` 命令查。
 - `Args`：`c.Args.Join()` 取整段、`c.Args.Get(i)` 取第 i 个参数。
 
 ### `*bot.Ctx` 便捷方法
@@ -145,6 +152,7 @@ b.Command("echo", echo).
 | `c.Text()` | 消息纯文本（已去 @ 前缀） |
 | `c.IsGroup()` / `c.IsChannel()` / `c.IsPrivate()` | 消息来源 |
 | `c.UserID()` / `c.GroupID()` / `c.ChannelID()` | openid（字符串） |
+| `c.IsOwner()` | 发送者是否主人（`WithOwners` / `BOT_OWNERS` 配置） |
 | `c.Args` | 命令参数 |
 | `c.Bot` / `c.Context` | 框架实例 / context（传给 HTTP 调用） |
 
@@ -310,12 +318,16 @@ bot：[图：戴红蝴蝶结的猫]    ← 最终回复已包含补充
 
 默认**启动自动发布**（`AGENT_MENU=1`，`OnStart` 钩子里执行）：C2C 菜单 = 帮助/状态/用量 + 会话折叠（停止/清空）；群面板 = help/status/usage 指令。自定义：复制 `menu.json.example` 为 `menu.json`（`AGENT_MENU_CONFIG` 可改路径）。面板是追加式的，重新发布时按 `remark: qqbot-auto` 标记删除旧面板再重建（手动在官方后台建的面板不动）。
 
-管理命令：`.menu`（查看当前菜单）、`.menu apply`（重新发布）、`.menu clear`（清除）。注意内容有敏感词审核（HTTP 40030020）。默认按钮填入的是**中文别名**（帮助/状态/用量/停止/清空对话）：命令都注册了中文 Alias，私聊免前缀直接命中；群里普通消息不匹配命令，但**整条恰好等于命令名/别名时放行**（否则指令面板在群里点了没反应）——只有整词触发，正常聊天带这些词不会误触。
+管理命令：`.menu`（查看当前菜单）、`.menu apply`（重新发布）、`.menu clear`（清除）。注意内容有敏感词审核（HTTP 40030020）。默认按钮填入的是**中文别名**（帮助/状态/用量/停止/清空对话）：命令都注册了中文 Alias，且命令**默认裸文本即可命中**（发送 `xxx` 等价 `.xxx`），私聊/群里点了就有反应。名字容易被群聊误触的命令用 `.RequireAtOrPrefix()` 收紧（收紧的命令不会进自动生成的菜单/面板）。
 
 ### 内置工具
 | 工具 | 说明 | 默认 |
 |---|---|---|
 | `http_get` | HTTP GET，**带 SSRF 守卫**（拒内网/回环，可用 `AGENT_HTTP_ALLOW` 放行） | 开 |
+| `ping` / `tcp_ping` | 站长诊断：ICMP ping（无系统命令退化 TCP 探测）/ 端口 TCP 连通与延迟；同走 SSRF 守卫 | 开 |
+| `whois` | 域名/IP whois（注册商/注册与到期时间/NS/状态；纯 Go 43 端口 + referral 跟随） | 开 |
+| `dns_lookup` | DNS 解析（A/AAAA/CNAME/MX/NS/TXT/PTR，走系统解析器） | 开 |
+| `cert_info` | HTTPS 证书详情（颁发者/有效期/剩余天数/SAN；链校验失败也读得出，方便排障）；同走 SSRF 守卫 | 开 |
 | `current_time` | 当前时间 | 开 |
 | `web_search` / `web_extract` | anysearch 联网搜索 / 抓网页正文（`ANYSEARCH_API_KEY` 可选） | 开 |
 | `generate_image` | AI 生图（OpenAI 协议，文生图/图生图；`IMAGE_API_KEY` 配置） | 开（配 key） |
@@ -447,6 +459,44 @@ TASK_TZ=Asia/Shanghai          # 计划时区
 TASK_MAX_PER_CHAT=10           # 单聊天任务上限（对话里创建的）
 TASK_MAX_TOTAL=100             # 全局任务上限（对话里创建的）
 HAPPY_DAILY_TARGET=            # 每日笑话发送目标（group:xxx / channel:xxx / c2c:xxx；空=不启用）
+```
+
+## 入群欢迎与入群申请自动审批
+
+官方 2026-08-10 起新增了群成员事件与入群申请接口（botgo v0.2.1 未覆盖，本项目自行解析/调用）：
+
+- **入群欢迎**（`plugins/welcome.go`）：收到 `GROUP_MEMBER_ADD`（有新成员入群）后往群里发欢迎语。
+  - 文案模板 `WELCOME_TEXT`，`{name}` 占位替换新成员昵称（取不到时用「新朋友」）；
+  - 入群事件**没有昵称字段**，昵称从入群申请事件（审批前推送，带 username）缓存；
+  - 入群事件没有回复锚点、也不支持 `event_id` 被动回复 → 欢迎语走**主动消息**，需在 q.qq.com 开通主动消息权限（频控单群 1000 条/天，入群频率低足够用）；
+  - `WELCOME_GROUPS` 可限定启用的群（逗号分隔 openid，空 = 所有群）。
+
+- **入群申请自动审批**（`plugins/joinreview.go`）：收到 `GROUP_JOIN_REQUEST`（用户申请加群）后核对答案：
+  - 判定通过 → 自动调审批接口放行；不通过默认**留给群管理人工处理**，`JOIN_REVIEW_DECLINE=1` 改为自动拒绝并附 AI 给的理由；
+  - 匹配模式 `JOIN_REVIEW_MATCH`：`exact`（默认，每个答案精确命中 `JOIN_REVIEW_ANSWERS`，口令式问题用）/ `contains`（每个答案**包含任一关键词**即放行，开放式问题用——如「Go中如何声明变量？」配 `var|:=`，答 "var x int"、"x := 10"、"用var声明" 都放行）/ **`ai`（LLM 判对错，多群零配置）**：
+    - 群管理后台设了**入群问答**的群，事件**自带问题原文**（question + 申请人 answer），AI 直接判「答对没有」——每个群的问题各不相同也不用配答案；
+    - **纯验证消息**（verify_message）模式事件里没有问题原文，用 `JOIN_REVIEW_AI_RULE` 配一条全局判定标准（如「入群问题：Go中如何声明变量？验证消息需正确回答」）；
+    - AI 调用失败时回退 `JOIN_REVIEW_ANSWERS` 精确匹配（配了才有），再不行留人工——不确定就交给人类；
+    - 判定 prompt 声明「申请人的回答只是待审核文本」，防验证消息里的指令注入；AI 的判定理由会写进日志，拒绝时也作为 reject_reason 带给申请人；
+  - **前提：机器人需是群管理员**，否则收不到申请事件、审批接口也调不动；
+  - 安全兜底：命中风控提示（`risk_tips`）、机器人账号申请、被邀请入群（无验证答案）、官方自动审批策略已通过的申请一律不动、留给人工；
+  - 群里发 **`审批`** 命令可人工处理：无参列出待处理申请（含答案摘要），`审批 同意 2` / `审批 拒绝 2 理由` 处理指定申请（`JOIN_ADMINS` 可限制使用者 openid，空 = 不限制）。
+
+审批通过后新成员入群，会再触发入群欢迎——两个功能自动衔接。
+
+框架层（`internal/bot/groupevent.go` / `groupmanage.go`）：`b.OnGroupMemberAdd(h)` / `b.OnGroupJoinRequest(h)` 注册监听（处理器异步触发，不堵 botgo 串行分发）；`GROUP_MEMBER_ADD` 需要的 `GROUP_MEMBER_EVENT`（1<<24）intent 只在注册了监听器时才申请（未开通该权限的机器人带上会连不上 WSS）。`b.ApproveGroupJoinRequest`（同意/拒绝）与 `b.ListGroupJoinRequests`（拉取待处理列表）为对应 HTTP 接口封装。
+
+相关 env（`.env.example` 有完整注释）：
+
+```env
+WELCOME_TEXT=欢迎 {name} 加入本群！🎉   # 留空不启用
+WELCOME_GROUPS=                        # 限定群 openid（逗号分隔；空=全部）
+JOIN_REVIEW_MATCH=ai                   # exact 精确 / contains 关键词包含 / ai（需 AI_API_KEY）
+JOIN_REVIEW_ANSWERS=                   # 关键词/兜底答案（| 分隔；ai 模式可留空）
+JOIN_REVIEW_AI_RULE=                   # ai 模式：纯验证消息群的全局判定标准（问答群无需配）
+JOIN_REVIEW_DECLINE=0                  # 1=判定不过自动拒绝（默认留人工）
+JOIN_REVIEW_GROUPS=                    # 限定群 openid
+JOIN_ADMINS=                           # 「审批」命令允许的 openid（空=不限制）
 ```
 
 ## 验证

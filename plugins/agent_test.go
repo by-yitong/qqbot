@@ -9,45 +9,6 @@ import (
 	"qqbot/internal/memory"
 )
 
-func TestAppendImagesToQuestion(t *testing.T) {
-	// 单张：内联一行
-	out := appendImagesToQuestion("画只猫", []bot.Image{{URL: "https://x/a.png"}})
-	if !strings.Contains(out, "画只猫") {
-		t.Errorf("应保留原文本: %q", out)
-	}
-	if !strings.Contains(out, "[用户发送了1张图片，URL：https://x/a.png]") {
-		t.Errorf("单张内联格式错: %q", out)
-	}
-
-	// 多张：编号列表
-	out = appendImagesToQuestion("", []bot.Image{
-		{URL: "https://x/a.png"},
-		{URL: "https://x/b.jpg"},
-	})
-	if !strings.Contains(out, "2张图片") {
-		t.Errorf("应标注2张: %q", out)
-	}
-	if !strings.Contains(out, "1. https://x/a.png") || !strings.Contains(out, "2. https://x/b.jpg") {
-		t.Errorf("多张编号格式错: %q", out)
-	}
-	// 空文本多张：不应有前导换行
-	if strings.HasPrefix(out, "\n") {
-		t.Errorf("空文本不应前导换行: %q", out)
-	}
-
-	// 原文本 + 多张：中间用空行隔开
-	out = appendImagesToQuestion("把这两张合并", []bot.Image{
-		{URL: "https://x/a.png"},
-		{URL: "https://x/b.jpg"},
-	})
-	if !strings.HasPrefix(out, "把这两张合并") {
-		t.Errorf("应以原文本开头: %q", out)
-	}
-	if !strings.Contains(out, "\n\n[用户发送了") {
-		t.Errorf("原文本与图片段间应有空行: %q", out)
-	}
-}
-
 func TestItoa(t *testing.T) {
 	cases := []struct {
 		in   int

@@ -49,3 +49,34 @@ func TestToOpenAIMessagesAssistantContentOnly(t *testing.T) {
 		t.Errorf("content: %v", out[0])
 	}
 }
+
+func TestToOpenAIMessagesWithImages(t *testing.T) {
+	// 多模态：user 带图片时 content 是 [text, image_url...] 数组。
+	out := ToOpenAIMessages([]Message{
+		NewUserWithImages("这是什么", []string{"https://x/a.png", "https://x/b.jpg"}),
+	})
+	m := out[0]
+	if m["role"] != "user" {
+		t.Fatalf("role: %v", m["role"])
+	}
+	parts, ok := m["content"].([]map[string]any)
+	if !ok || len(parts) != 3 {
+		t.Fatalf("content parts: %#v", m["content"])
+	}
+	if parts[0]["type"] != "text" || parts[0]["text"] != "这是什么" {
+		t.Errorf("text part: %v", parts[0])
+	}
+	for i, want := range []string{"https://x/a.png", "https://x/b.jpg"} {
+		iu, ok := parts[i+1]["image_url"].(map[string]any)
+		if !ok || parts[i+1]["type"] != "image_url" || iu["url"] != want {
+			t.Errorf("image part %d: %v", i, parts[i+1])
+		}
+	}
+
+	// 无文本只有图：补一个占位 text part（部分网关拒绝纯图片 content）。
+	out = ToOpenAIMessages([]Message{NewUserWithImages("", []string{"https://x/a.png"})})
+	parts = out[0]["content"].([]map[string]any)
+	if len(parts) != 2 || parts[0]["type"] != "text" || parts[0]["text"] == "" {
+		t.Errorf("空文本应有占位 text part: %#v", parts)
+	}
+}

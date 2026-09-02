@@ -148,7 +148,7 @@ func TestSteerInjectsIntoRunningRun(t *testing.T) {
 	r := startRun(a, "u1", "画只猫")
 	waitSignal(t, tool.started, "工具开始执行")
 
-	if !a.Steer("u1", "[小红] 加个红色蝴蝶结") {
+	if !a.Steer("u1", NewUser("[小红] 加个红色蝴蝶结")) {
 		t.Fatal("运行中 Steer 应返回 true")
 	}
 	close(tool.release)
@@ -180,7 +180,7 @@ func TestSteerKeepsRunAliveAfterFinalText(t *testing.T) {
 	r := startRun(a, "u1", "画只猫")
 	waitSignal(t, llm.started, "LLM 第 1 次调用")
 
-	if !a.Steer("u1", "加个蝴蝶结") {
+	if !a.Steer("u1", NewUser("加个蝴蝶结")) {
 		t.Fatal("运行中 Steer 应返回 true")
 	}
 	close(llm.release)
@@ -199,7 +199,7 @@ func TestSteerKeepsRunAliveAfterFinalText(t *testing.T) {
 
 func TestSteerNoActiveRunReturnsFalse(t *testing.T) {
 	a := New(Config{LLM: newGateLLM(&LLMResult{Content: "x", FinishReason: "stop"})})
-	if a.Steer("nobody", "补充") {
+	if a.Steer("nobody", NewUser("补充")) {
 		t.Fatal("无活跃 Run 时 Steer 应返回 false")
 	}
 }
@@ -211,7 +211,7 @@ func TestSteerAfterRunEndsReturnsFalse(t *testing.T) {
 	if _, err := a.Run(context.Background(), "u1", "hello"); err != nil {
 		t.Fatalf("err: %v", err)
 	}
-	if a.Steer("u1", "补充") {
+	if a.Steer("u1", NewUser("补充")) {
 		t.Fatal("Run 结束后 Steer 应返回 false")
 	}
 }
@@ -377,7 +377,7 @@ func TestStatusAndWaitIdle(t *testing.T) {
 	if !info.Running {
 		t.Fatal("运行中 Running 应为 true")
 	}
-	if a.Steer("u1", "补充一") {
+	if a.Steer("u1", NewUser("补充一")) {
 		if info2 := a.Status("u1"); info2.Pending != 1 {
 			t.Fatalf("Pending 应为 1，实际 %d", info2.Pending)
 		}

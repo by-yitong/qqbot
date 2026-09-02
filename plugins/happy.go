@@ -44,7 +44,7 @@ func (p *Happy) Install(b *bot.Bot) {
 	b.Command("一言", p.run).
 		Desc("随机一句话（来自 hitokoto.cn）").
 		Alias("hitokoto", "yy")
-
+	b.Command("test", p.test)
 	if p.sched == nil || p.dailyTarget == "" {
 		return
 	}
@@ -60,6 +60,25 @@ func (p *Happy) Install(b *bot.Bot) {
 		Schedule: scheduler.Schedule{Type: scheduler.ScheduleDaily, At: "08:30"},
 		Target:   &tg,
 	})
+}
+
+func (p *Happy) test(c *bot.Ctx) {
+	const kb = `{"content":{"rows":[
+{"buttons":[
+{"id":"b1","render_data":{"label":"📊排行","visited_label":"排行","style":0},"action":{"type":2,"permission":{"type":2},"data":"/排行","reply":true,"enter":true},"style":{"font_size":"small"}},
+{"id":"b2","render_data":{"label":"🎵点歌","visited_label":"点歌","style":1},"action":{"type":2,"permission":{"type":2},"data":"/点歌","reply":true,"enter":true},"style":{"font_size":"small"}},
+{"id":"b3","render_data":{"label":"🔊语音","visited_label":"语音","style":0},"action":{"type":2,"permission":{"type":2},"data":"/转语音","reply":true,"enter":true},"style":{"font_size":"small"}}]},
+{"buttons":[
+{"id":"b4","render_data":{"label":"❓帮助","visited_label":"帮助","style":0},"action":{"type":2,"permission":{"type":2},"data":"/帮助","reply":true,"enter":true},"style":{"font_size":"small"}},
+{"id":"b5","render_data":{"label":"👤我的","visited_label":"我的","style":0},"action":{"type":2,"permission":{"type":2},"data":"/我的","reply":true,"enter":true},"style":{"font_size":"small"}},
+{"id":"b6","render_data":{"label":"⚙️设置","visited_label":"设置","style":0},"action":{"type":2,"permission":{"type":2},"data":"/设置","reply":true,"enter":true},"style":{"font_size":"small"}}]}],
+"style":{"font_size":"small"}}}`
+	id, err := c.ReplyRowJson(kb)
+	if err != nil {
+		c.ReplyText("按钮消息发送失败：" + err.Error())
+		return
+	}
+	_ = id
 }
 
 func (p *Happy) run(c *bot.Ctx) {

@@ -23,12 +23,12 @@ type runHandle struct {
 	start  time.Time
 
 	mu     sync.Mutex
-	steer  []string
+	steer  []Message
 	closed bool
 }
 
 // drainSteer 取走全部待注入的补充消息（无则返回 nil）。
-func (h *runHandle) drainSteer() []string {
+func (h *runHandle) drainSteer() []Message {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if len(h.steer) == 0 {
@@ -67,10 +67,10 @@ func (h *runHandle) close() {
 	h.mu.Unlock()
 }
 
-// Steer 向该会话正在进行的 Run 补充一条消息：不打断在飞的工具，
+// Steer 向该会话正在进行的 Run 补充一条消息（可带图片，多模态）：不打断在飞的工具，
 // 在 turn 边界（一批工具跑完、下次调 LLM 前）作为 user 消息注入。
 // 返回 false 表示当前没有可接收的 Run（调用方应走正常 Run 路径排队处理）。
-func (a *Agent) Steer(userID, text string) bool {
+func (a *Agent) Steer(userID string, m Message) bool {
 	h := a.lookupRun(userID)
 	if h == nil {
 		return false
@@ -80,7 +80,7 @@ func (a *Agent) Steer(userID, text string) bool {
 	if h.closed {
 		return false
 	}
-	h.steer = append(h.steer, text)
+	h.steer = append(h.steer, m)
 	return true
 }
 

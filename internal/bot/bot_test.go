@@ -127,9 +127,9 @@ func TestMatchCommand(t *testing.T) {
 		wantCmd string
 		raw     string
 	}{
-		{"群非@无前缀整条等于别名", newCtx(b, "group", "p"), true, "p", ""}, // 面板填入场景：放行
-		{"群非@无前缀带参不放行", newCtx(b, "group", "ping hi"), false, "", ""},
-		{"群非@子串不放行", newCtx(b, "group", "xxpingxx"), false, "", ""},
+		{"群非@无前缀整条等于别名", newCtx(b, "group", "p"), true, "p", ""},           // 面板填入场景
+		{"群非@无前缀带参也命中", newCtx(b, "group", "ping hi"), true, "ping", "hi"}, // 裸文本默认可命中
+		{"群非@子串不命中", newCtx(b, "group", "xxpingxx"), false, "", ""},
 		{"群@无前缀", newCtxAt(b, "group", "ping"), true, "ping", ""},
 		{"群带前缀", newCtx(b, "group", "/ping"), true, "ping", ""},
 		{"私聊无前缀", newCtx(b, "c2c", "p"), true, "p", ""},
@@ -168,13 +168,39 @@ func TestMatchCommandMultiPrefix(t *testing.T) {
 			t.Errorf("前缀 %q 应命中", p)
 		}
 	}
-	// 群非@且不带前缀：带参不命中（避免普通聊天误触发）
-	if _, _, ok := b.matchCommand(newCtx(b, "group", "ping hi")); ok {
-		t.Error("群非@无前缀带参不应命中")
+	// 群非@且不带前缀：裸文本默认也命中（发送 xxx 等价 .xxx）
+	if cmd, _, ok := b.matchCommand(newCtx(b, "group", "ping hi")); !ok || cmd == nil {
+		t.Error("群非@无前缀带参应命中")
 	}
 	// 群@bot 不带前缀 → 命中
 	if cmd, _, ok := b.matchCommand(newCtxAt(b, "group", "ping")); !ok || cmd == nil {
 		t.Error("群@无前缀应命中")
+	}
+}
+
+// TestMatchCommandRequireAtOrPrefix 验证 RequireAtOrPrefix：裸文本不命中，
+// 带前缀或 @机器人 才命中（私聊无法 @，即必须前缀）。
+func TestMatchCommandRequireAtOrPrefix(t *testing.T) {
+	b := newTestBot()
+	b.Command("admin", nop).RequireAtOrPrefix()
+
+	if _, _, ok := b.matchCommand(newCtx(b, "group", "admin x")); ok {
+		t.Error("群裸文本不应命中 RequireAtOrPrefix 命令")
+	}
+	if _, _, ok := b.matchCommand(newCtx(b, "group", "admin")); ok {
+		t.Error("群裸文本（整条等于命令名，面板场景）也不应命中")
+	}
+	if _, _, ok := b.matchCommand(newCtx(b, "c2c", "admin x")); ok {
+		t.Error("私聊裸文本不应命中 RequireAtOrPrefix 命令")
+	}
+	if _, _, ok := b.matchCommand(newCtx(b, "group", "/admin x")); !ok {
+		t.Error("群带前缀应命中")
+	}
+	if _, _, ok := b.matchCommand(newCtxAt(b, "group", "admin x")); !ok {
+		t.Error("群 @机器人 应命中")
+	}
+	if _, _, ok := b.matchCommand(newCtx(b, "c2c", "/admin x")); !ok {
+		t.Error("私聊带前缀应命中")
 	}
 }
 

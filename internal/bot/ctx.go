@@ -2,9 +2,12 @@ package bot
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 
 	"github.com/tencent-connect/botgo/dto"
+	"github.com/tencent-connect/botgo/dto/keyboard"
 )
 
 // ErrNotConnected 在尚未连接（api 未就绪）时由 ReplyText 返回。
@@ -107,6 +110,9 @@ func (c *Ctx) UserID() string { return c.userID }
 // Username 返回发送者群昵称（可能为空；私聊/频道事件常缺）。
 func (c *Ctx) Username() string { return c.username }
 
+// IsOwner 报告发送者是否主人（WithOwners 配置的 openid 集合；未配置则恒 false）。
+func (c *Ctx) IsOwner() bool { return c.Bot.IsOwner(c.userID) }
+
 // MessageID 返回消息 id（回复锚点；也用作聊天记录去重键）。
 func (c *Ctx) MessageID() string { return c.messageID }
 
@@ -132,6 +138,25 @@ func (c *Ctx) ReplyMarkdown(md string) (string, error) {
 	return c.send(&dto.MessageToCreate{
 		MsgType:  dto.MarkdownMsg,
 		Markdown: &dto.Markdown{Content: md},
+	})
+}
+
+// ReplyRowJson 以按钮消息（keyboard）回复当前消息：rawJSON 为按钮组件的原始 JSON，
+// 结构为 {"content": {"rows": [...], "style": {...}}}（见 botgo keyboard 包）。
+// 按钮消息需以 markdown 消息发送，content 会被置为一个空格占位。
+func (c *Ctx) ReplyRowJson(rawJSON string) (string, error) {
+	var kb keyboard.MessageKeyboard
+	if err := json.Unmarshal([]byte(rawJSON), &kb); err != nil {
+		return "", fmt.Errorf("按钮 JSON 解析失败: %w", err)
+	}
+	if kb.Content == nil {
+		return "", fmt.Errorf("按钮 JSON 缺少 content 字段")
+	}
+	return c.send(&dto.MessageToCreate{
+		MsgType:  dto.MarkdownMsg,
+		Content:  " ",
+		Markdown: &dto.Markdown{Content: " "},
+		Keyboard: &kb,
 	})
 }
 

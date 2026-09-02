@@ -214,7 +214,7 @@ type MenuConfig struct {
 
 // DefaultMenuConfig 内置默认：C2C 底部菜单（命令直达）+ 群指令面板（全局）。
 // command/menu 按钮点击后是把文本填入输入框，内容用中文别名（如「状态」）——
-// 私聊免前缀直接命中，群里整条等于命令别名也放行（见 matchCommand）。
+// 命令默认裸文本即可命中（见 matchCommand），面板点了就有反应。
 func DefaultMenuConfig() MenuConfig {
 	return MenuConfig{
 		Menu: Menu{Items: []MenuItem{
@@ -242,8 +242,10 @@ func DefaultMenuConfig() MenuConfig {
 	}
 }
 
-// AutoMenuConfig 按当前已注册命令自动生成发布配置：每个非隐藏且未 HideBotMenu 的
-// 命令进 C2C 底部菜单（send_message，点击填入命令名）和群指令面板（command 项）。
+// AutoMenuConfig 按当前已注册命令自动生成发布配置：每个非隐藏、未 HideBotMenu、
+// 未 RequireAtOrPrefix（面板填入的是裸命令名，点了不会命中）的命令进 C2C 底部菜单
+// （send_message，点击填入命令名）和群指令面板（command 项）。
+// OwnerOnly 命令不进面板/菜单——面板对所有用户可见，主人命令不该出现在那里。
 // 在发布时（OnStart / .menu apply）调用，保证所有命令都已注册完毕。
 func (b *Bot) AutoMenuConfig() MenuConfig {
 	b.mu.RLock()
@@ -251,7 +253,7 @@ func (b *Bot) AutoMenuConfig() MenuConfig {
 	cfg := MenuConfig{}
 	panel := Panel{Remark: AutoPanelRemark}
 	for _, c := range b.cmds {
-		if c.hidden || c.hideBotMenu {
+		if c.hidden || c.hideBotMenu || c.requireAt || c.ownerOnly {
 			continue
 		}
 		if len(cfg.Menu.Items) < 10 { // 菜单上限 10 项

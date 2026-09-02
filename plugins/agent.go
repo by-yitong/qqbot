@@ -220,9 +220,14 @@ func (p *AgentPlugin) handle(c *bot.Ctx) {
 	if q := c.Quote(); q != "" {
 		question = "[引用的消息]\n" + q + "\n\n[我的消息]\n" + question
 	}
-	// 用户发了图片：把图片 URL 拼进输入。
-	if len(images) > 0 {
-		question = appendImagesToQuestion(question, images)
+	// 用户发了图片：作为多模态输入（OpenAI image_url）随问题发给视觉模型，
+	// 文本里不再拼 URL（模型直接看图，无需也无法点链接）。
+	var imageURLs []string
+	for _, img := range images {
+		imageURLs = append(imageURLs, img.URL)
+	}
+	if question == "" && len(imageURLs) > 0 {
+		question = "（用户发送了图片）"
 	}
 
 	// 会话 key：群共享（g:群id），私聊按用户。
@@ -231,7 +236,7 @@ func (p *AgentPlugin) handle(c *bot.Ctx) {
 	// 补充优先（steering）：该会话有活跃 Run 时，把消息注入当前处理（turn 边界生效，
 	// 不打断在飞的工具），而非排队等上一轮结束。返回 false 说明没有进行中的 Run，
 	// 走正常 Run 路径。
-	if p.ag.Steer(key, question) {
+	if p.ag.Steer(key, agent.NewUserWithImages(question, imageURLs)) {
 		if p.steerAck {
 			replyTextWithMention(c, "（已收到，会并入当前任务继续处理）")
 		}
@@ -242,6 +247,9 @@ func (p *AgentPlugin) handle(c *bot.Ctx) {
 	runCtx := c.Context
 	var opts []agent.RunOption
 	opts = append(opts, agent.WithResponder(&imageResponder{c: c, host: p.imgHost}))
+	if len(imageURLs) > 0 {
+		opts = append(opts, agent.WithImages(imageURLs))
+	}
 	if p.mem != nil {
 		runCtx = memory.WithScope(runCtx, p.scopeOf(c)) // search_history 工具按此隔离查询
 		if blk := p.ctxBlockOf(c); blk != "" {
@@ -449,31 +457,6 @@ func (r *imageResponder) SendImage(ctx context.Context, url string) error {
 // 否则按本地文件路径处理。
 func isRemoteImage(s string) bool {
 	return strings.HasPrefix(s, "http://") || strings.HasPrefix(s, "https://") || strings.HasPrefix(s, "genimg:")
-}
-
-// appendImagesToQuestion 把用户发送的图片 URL 拼进 agent 输入文本。
-func appendImagesToQuestion(question string, imgs []bot.Image) string {
-	var sb strings.Builder
-	sb.WriteString(question)
-	if question != "" {
-		sb.WriteString("\n\n")
-	}
-	if len(imgs) == 1 {
-		sb.WriteString("[用户发送了1张图片，URL：")
-		sb.WriteString(imgs[0].URL)
-		sb.WriteString("]")
-		return sb.String()
-	}
-	sb.WriteString("[用户发送了")
-	sb.WriteString(itoa(len(imgs)))
-	sb.WriteString("张图片，URL：]\n")
-	for i, img := range imgs {
-		sb.WriteString(itoa(i + 1))
-		sb.WriteString(". ")
-		sb.WriteString(img.URL)
-		sb.WriteByte('\n')
-	}
-	return strings.TrimRight(sb.String(), "\n")
 }
 
 // itoa 简单正整数转字符串（避免引入 strconv）。

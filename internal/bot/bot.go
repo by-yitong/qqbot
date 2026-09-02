@@ -30,6 +30,7 @@ type Options struct {
 	Prefixes   []string // 命令前缀（可选；命中前缀会去掉再匹配）
 	EnableHelp bool     // 自动注册 /help，默认 true
 	HelpName   string   // help 命令名，默认 "help"
+	Owners     []string // 主人 openid 列表（OwnerOnly 命令仅他们可用；空 = 无人可用）
 }
 
 // Option 用于 New 的可选参数。
@@ -37,6 +38,10 @@ type Option func(*Options)
 
 // WithPrefixes 设置命令前缀。
 func WithPrefixes(p ...string) Option { return func(o *Options) { o.Prefixes = p } }
+
+// WithOwners 设置主人 openid 列表（OwnerOnly 命令仅主人可用）。
+// 注意是 fail-closed：不配置则 OwnerOnly 命令对所有人拒绝。
+func WithOwners(ids ...string) Option { return func(o *Options) { o.Owners = ids } }
 
 // WithHelp 开关自动 /help。
 func WithHelp(enable bool) Option { return func(o *Options) { o.EnableHelp = enable } }
@@ -61,9 +66,14 @@ type Bot struct {
 	middlewares []Middleware
 	plugins     []Plugin
 
+	memberAddHandlers []GroupMemberAddHandler   // 群成员加入事件（groupevent.go）
+	joinReqHandlers   []GroupJoinRequestHandler // 入群申请事件（groupevent.go）
+
 	startHooks []StartHook // api 就绪后在 Run 中触发（启动通知等）
 
 	state *stateStore
+
+	owners map[string]struct{} // 主人 openid 集合（New 时定死，只读无需锁）
 
 	seq       atomic.Uint32
 	startOnce sync.Once
@@ -87,14 +97,28 @@ func New(cfg Config, opts ...Option) *Bot {
 	// 按长度降序，避免短前缀吞掉长前缀。
 	sort.Slice(prefixes, func(i, j int) bool { return len(prefixes[i]) > len(prefixes[j]) })
 
+	owners := make(map[string]struct{}, len(o.Owners))
+	for _, id := range o.Owners {
+		if id != "" {
+			owners[id] = struct{}{}
+		}
+	}
+
 	return &Bot{
 		cfg:      cfg,
 		opts:     o,
 		prefixes: prefixes,
 		helpName: o.HelpName,
+		owners:   owners,
 		cmdIndex: map[string]*Command{},
 		state:    newStateStore(),
 	}
+}
+
+// IsOwner 报告 userID 是否主人（WithOwners 配置的 openid 集合）。
+func (b *Bot) IsOwner(userID string) bool {
+	_, ok := b.owners[userID]
+	return ok
 }
 
 // NC 返回底层 openapi.OpenAPI（需要直接调官方接口时用）。连接前为 nil。
@@ -236,7 +260,7 @@ func (b *Bot) Run(ctx context.Context) error {
 		b.mu.RUnlock()
 		if b.opts.EnableHelp && !exists {
 			b.Command(b.helpName, func(c *Ctx) {
-				_, _ = c.ReplyText(c.Bot.Help())
+				_, _ = c.ReplyText(c.Bot.HelpFor(c))
 			}).Desc("显示命令列表")
 		}
 	})
@@ -250,6 +274,14 @@ func (b *Bot) Run(ctx context.Context) error {
 	// 群全量消息（GROUP_MESSAGE_CREATE，无需 @）：botgo v0.2.1 无内置类型，
 	// 用通用 dispatch 注册；intent 已含（IntentGroupMessages 覆盖，需 q.qq.com 开通全量权限）。
 	botgo.RegisterDispatchEventHandler("GROUP_MESSAGE_CREATE", b.onGroupMessage)
+	// 群成员加入 / 入群申请事件（官方 2026-08 新增，同样不在 botgo v0.2.1 内置类型里）。
+	// 入群申请与群消息同 intent（1<<25，已含）；群成员事件需补 1<<24，
+	// 只在注册了监听器时申请（未开通该权限的机器人带上会连不上 WSS）。
+	botgo.RegisterDispatchEventHandler("GROUP_MEMBER_ADD", b.onGroupMemberAdd)
+	botgo.RegisterDispatchEventHandler("GROUP_JOIN_REQUEST", b.onGroupJoinRequest)
+	if b.wantGroupMemberEvent() {
+		intent |= IntentGroupMemberEvent
+	}
 
 	ap, err := b.api.WS(ctx, map[string]string{}, "")
 	if err != nil {

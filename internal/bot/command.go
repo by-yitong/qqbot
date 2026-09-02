@@ -37,6 +37,8 @@ type Command struct {
 	usage       string
 	hidden      bool
 	hideBotMenu bool
+	requireAt   bool     // 必须命中前缀或 @机器人 才触发（默认 false：裸文本也命中）
+	ownerOnly   bool     // 仅主人（WithOwners 配置的 openid）可用；未配置主人 = 无人可用
 	handler     CommandHandler
 	mw          []Middleware
 	sc          scope
@@ -61,6 +63,18 @@ func (c *Command) Hidden() *Command { c.hidden = true; return c }
 
 // HideBotMenu 让命令不自动注册到 QQ bot 自定义菜单/指令面板（不影响 /help）。
 func (c *Command) HideBotMenu() *Command { c.hideBotMenu = true; return c }
+
+// RequireAtOrPrefix 要求该命令必须带命令前缀或 @机器人 才触发（默认关闭）。
+//
+// 默认情况下命令「裸文本也可命中」：发送 xxx 等价 .xxx，群里不用 @ 不用前缀，
+// 指令面板点击、免前缀直达都靠它。名字是常用词、容易被群聊误触的命令可显式
+// 收紧成必须前缀/@（AI 兜底等无命令功能不走命令表，本来就要求 @ 或前缀）。
+func (c *Command) RequireAtOrPrefix() *Command { c.requireAt = true; return c }
+
+// OwnerOnly 限制命令仅主人可用（WithOwners 配置的 openid，环境变量 BOT_OWNERS）。
+// fail-closed：未配置主人时对所有人拒绝。此类命令同时不进 /help（非主人视角）
+// 与自动菜单/指令面板（面板所有用户可见，主人命令不该出现在那里）。
+func (c *Command) OwnerOnly() *Command { c.ownerOnly = true; return c }
 
 // Use 为该命令追加专属中间件（在作用域检查之后执行）。
 func (c *Command) Use(mw ...Middleware) *Command { c.mw = append(c.mw, mw...); return c }
@@ -94,24 +108,25 @@ func (b *Bot) registerAliases(c *Command, names []string) {
 
 // matchCommand 在 c.Content 上匹配命令：可选去掉一个前缀，再按首 token 查命令表。
 //
-// 群聊规则（与 agent 兜底一致）：非 @消息 必须带前缀才匹配命令，
-// 避免普通群消息碰巧等于命令名而触发；@消息/私聊/频道 前缀可选。
-// 例外：群普通消息**整条恰好等于**命令名/别名时放行——指令面板点击填入的就是
-// 命令名本身（如「状态」），不放行的话面板在群里点了没反应。
+// 命令默认「裸文本也可命中」：不带前缀、不 @ 也能触发（发送 xxx 等价 .xxx，
+// 指令面板点击填入的就是命令名本身）。显式 RequireAtOrPrefix 的命令是例外——
+// 必须命中前缀或 @机器人 才匹配（私聊无法 @，即必须带前缀）。
+// AI 兜底不走命令表，群消息本来就要求 @ 或前缀，不受此放宽影响。
 func (b *Bot) matchCommand(c *Ctx) (*Command, Args, bool) {
 	text := c.Content
-	prefixHit := false
+	triggered := c.AtBot() // 频道/群 @消息恒 true
 	if p := b.matchPrefix(text); p != "" {
 		text = strings.TrimSpace(text[len(p):])
-		prefixHit = true
+		triggered = true
 	}
-	if c.IsGroup() && !c.AtBot() && !prefixHit {
-		if len(strings.Fields(text)) != 1 {
-			return nil, Args{}, false
-		}
-		return b.parseCommand(text)
+	cmd, args, ok := b.parseCommand(text)
+	if !ok {
+		return nil, Args{}, false
 	}
-	return b.parseCommand(text)
+	if cmd.requireAt && !triggered {
+		return nil, Args{}, false
+	}
+	return cmd, args, true
 }
 
 // matchPrefix 返回命中的前缀（已按长度降序）；未命中返回 ""。
@@ -164,6 +179,14 @@ func (b *Bot) runCommand(c *Ctx, cmd *Command) {
 func (b *Bot) scopeMiddleware(cmd *Command) Middleware {
 	return func(next MessageHandler) MessageHandler {
 		return func(c *Ctx) {
+			if cmd.ownerOnly && !c.IsOwner() {
+				if len(b.owners) == 0 {
+					_, _ = c.ReplyText("该命令仅主人可用，但尚未配置主人（.env 的 BOT_OWNERS，多个用逗号分隔）")
+				} else {
+					_, _ = c.ReplyText("该命令仅主人可用")
+				}
+				return
+			}
 			switch {
 			case cmd.sc.groupOnly && !c.IsGroup():
 				_, _ = c.ReplyText("该命令仅在群聊可用")
@@ -180,8 +203,18 @@ func (b *Bot) scopeMiddleware(cmd *Command) Middleware {
 	}
 }
 
-// Help 返回所有非隐藏命令的帮助文本。
+// Help 返回所有非隐藏命令的帮助文本（不过滤主人命令；按身份过滤用 HelpFor）。
 func (b *Bot) Help() string {
+	return b.help(false)
+}
+
+// HelpFor 返回面向 c 发送者的帮助文本：非主人看不到 OwnerOnly 命令。
+func (b *Bot) HelpFor(c *Ctx) string {
+	return b.help(!c.IsOwner())
+}
+
+// help 生成帮助文本；hideOwner 为 true 时跳过 OwnerOnly 命令。
+func (b *Bot) help(hideOwner bool) string {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 	pref := ""
@@ -191,7 +224,7 @@ func (b *Bot) Help() string {
 	var sb strings.Builder
 	sb.WriteString("命令列表：\n")
 	for _, c := range b.cmds {
-		if c.hidden {
+		if c.hidden || (hideOwner && c.ownerOnly) {
 			continue
 		}
 		names := pref + c.name
@@ -203,7 +236,7 @@ func (b *Bot) Help() string {
 			line += "  " + c.usage
 		}
 		if c.desc != "" {
-			line += " — " + c.desc
+			line += "  — " + c.desc
 		}
 		sb.WriteString(line)
 		sb.WriteByte('\n')

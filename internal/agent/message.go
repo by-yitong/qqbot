@@ -23,6 +23,7 @@ type ToolCall struct {
 type Message struct {
 	Role       Role       // user / assistant / tool
 	Content    string     // 文本内容
+	Images     []string   // 仅 user 可携带：图片 URL（http/https 或 data:base64），以 OpenAI image_url 形式发给多模态模型；随 session 落盘
 	ToolCalls  []ToolCall // 仅 assistant 可携带（请求调用工具）
 	ToolCallID string     // role==tool 时，对应的 ToolCall.ID
 	Name       string     // role==tool 时，工具名
@@ -36,6 +37,12 @@ type Message struct {
 
 // NewUser 构造一条 user 消息。
 func NewUser(s string) Message { return Message{Role: RoleUser, Content: s} }
+
+// NewUserWithImages 构造一条带图片的 user 消息（多模态输入）。
+// imgs 为图片 URL（http/https 或 data:image/...;base64,...）。
+func NewUserWithImages(s string, imgs []string) Message {
+	return Message{Role: RoleUser, Content: s, Images: imgs}
+}
 
 // newEphemeralUser 构造一条临时 user 消息（发 LLM、不落 session）。
 func newEphemeralUser(s string) Message { return Message{Role: RoleUser, Content: s, ephemeral: true} }
@@ -52,15 +59,34 @@ func stripEphemeral(msgs []Message) []Message {
 }
 
 // ToOpenAIMessages 把内部消息序列转换为 OpenAI Chat Completions 的 messages 数组。
-//   - system / user：{role, content}
+//   - system：{role, content}
+//   - user：{role, content}；带图片时 content 为 [{type:"text"},{type:"image_url"}] 数组（多模态）
 //   - assistant：{role, content, tool_calls?}
 //   - tool：{role:"tool", content, tool_call_id, name?}
 func ToOpenAIMessages(msgs []Message) []map[string]any {
 	out := make([]map[string]any, 0, len(msgs))
 	for _, m := range msgs {
 		switch m.Role {
-		case RoleSystem, RoleUser:
-			out = append(out, map[string]any{"role": string(m.Role), "content": m.Content})
+		case RoleSystem:
+			out = append(out, map[string]any{"role": "system", "content": m.Content})
+		case RoleUser:
+			if len(m.Images) == 0 {
+				out = append(out, map[string]any{"role": "user", "content": m.Content})
+				break
+			}
+			// 多模态：文本为空也要给一个 text part（部分网关拒绝纯图片 content 数组）。
+			text := m.Content
+			if text == "" {
+				text = "（用户发送了图片）"
+			}
+			parts := []map[string]any{{"type": "text", "text": text}}
+			for _, u := range m.Images {
+				parts = append(parts, map[string]any{
+					"type":      "image_url",
+					"image_url": map[string]any{"url": u},
+				})
+			}
+			out = append(out, map[string]any{"role": "user", "content": parts})
 		case RoleAssistant:
 			mm := map[string]any{"role": "assistant"}
 			if m.Content != "" {

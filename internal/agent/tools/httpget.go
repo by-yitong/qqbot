@@ -94,7 +94,20 @@ func assertSafeURL(raw string, allow []string) error {
 	if u.Scheme != "http" && u.Scheme != "https" {
 		return fmt.Errorf("只允许 http/https，得到 %q", u.Scheme)
 	}
-	host := u.Hostname()
+	return assertSafeHost(u.Hostname(), allow)
+}
+
+// assertSafeHost 校验 host 解析到的是公网地址（SSRF 守卫，站长诊断工具共用）：
+// 回环/私网/链路本地等一律拒绝，allow 里的 host 显式放行；以 - 开头也拒绝
+// （防止被拼进 ping 等命令行参数造成选项注入）。
+func assertSafeHost(host string, allow []string) error {
+	host = strings.TrimSpace(host)
+	if host == "" {
+		return fmt.Errorf("缺少目标主机")
+	}
+	if strings.HasPrefix(host, "-") {
+		return fmt.Errorf("非法目标主机 %q", host)
+	}
 	for _, a := range allow {
 		if strings.EqualFold(host, a) {
 			return nil

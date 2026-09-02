@@ -42,6 +42,14 @@ func isOverflowResponse(statusCode int, body string) bool {
 	return false
 }
 
+// isRetryableStatus 判断网关响应是否值得退避重试（5xx 瞬时抖动；429 另算，不在此处理）。
+func isRetryableStatus(code int) bool {
+	return code == http.StatusInternalServerError ||
+		code == http.StatusBadGateway ||
+		code == http.StatusServiceUnavailable ||
+		code == http.StatusGatewayTimeout
+}
+
 // Completer 是 LLM 客户端的抽象（便于测试替身）。
 // 真实实现 *LLMClient 满足该接口。
 type Completer interface {
@@ -142,20 +150,35 @@ func (c *LLMClient) Complete(ctx context.Context, system string, msgs []Message,
 	}
 
 	start := time.Now()
-	resp, err := http.R().
-		SetContext(ctx).
-		SetHeader("Authorization", "Bearer "+c.APIKey).
-		SetHeader("Content-Type", "application/json").
-		SetBody(body).
-		Post(c.BaseURL + "/chat/completions")
-	if err != nil {
-		return nil, fmt.Errorf("LLM 请求失败: %w", err)
+	// 网关类 5xx（502/503/500 等）多为瞬时抖动，退避重试两次再放弃。
+	var resp *resty.Response
+	var err error
+	const attempts = 3
+	for i := 1; i <= attempts; i++ {
+		resp, err = http.R().
+			SetContext(ctx).
+			SetHeader("Authorization", "Bearer "+c.APIKey).
+			SetHeader("Content-Type", "application/json").
+			SetBody(body).
+			Post(c.BaseURL + "/chat/completions")
+		if err != nil {
+			return nil, fmt.Errorf("LLM 请求失败: %w", err)
+		}
+		if !isRetryableStatus(resp.StatusCode()) || i == attempts {
+			break
+		}
+		backoff := time.Duration(i) * 3 * time.Second
+		select {
+		case <-time.After(backoff):
+		case <-ctx.Done():
+			return nil, fmt.Errorf("LLM 请求被取消: %w", ctx.Err())
+		}
 	}
 	if resp.IsStatusFailure() {
 		if isOverflowResponse(resp.StatusCode(), resp.String()) {
 			return nil, fmt.Errorf("%w: HTTP %d: %s", ErrContextOverflow, resp.StatusCode(), resp.String())
 		}
-		return nil, fmt.Errorf("LLM HTTP %d: %s", resp.StatusCode(), resp.String())
+		return nil, fmt.Errorf("LLM HTTP %d（已重试 %d 次）: %s", resp.StatusCode(), attempts, resp.String())
 	}
 	result, err := parseLLMResponse(resp.Bytes())
 	if err != nil {
