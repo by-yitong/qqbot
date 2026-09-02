@@ -5,6 +5,7 @@ package bot
 //   - 审批：POST /v2/groups/{group_openid}/approval_join_request/{member_openid}
 //     op=approve 通过 / decline 拒绝；join_request_id 从事件回传。60 QPM，需机器人是群管理员。
 //   - 列表：GET /v2/groups/{group_openid}/join_request_list（分页）。30 QPM，需群管理员。
+//   - 自动审批策略列表：GET /v2/groups/join_approval_strategy（分页，不带群 id，机器人维度）。60 QPM。
 //
 // 文档：https://bot.q.qq.com/wiki/develop/api-v2/autogen/api/v2_groups_group_openid_approval_join_request_member_openid.post.html
 
@@ -69,6 +70,53 @@ func (b *Bot) ListGroupJoinRequests(ctx context.Context, groupOpenID string) ([]
 		}
 		out = append(out, page.List...)
 		if page.NextCursor == "" || len(page.List) == 0 {
+			return out, nil
+		}
+		cursor = page.NextCursor
+	}
+}
+
+// --- 入群自动审批策略（官方 2026-08 新增，botgo v0.2.1 未覆盖）---
+
+// JoinApprovalStrategy 入群自动审批策略：把关联群中命中白名单 QQ 号的入群申请
+// 自动审批通过。一个机器人最多 20 个策略；仅在机器人拥有关联群管理员身份时生效。
+// （另有创建/修改/删除/执行/白名单维护接口，文档：
+// https://bot.q.qq.com/wiki/develop/api-v2/server-inter/group/manage/join-approval-strategy.html）
+type JoinApprovalStrategy struct {
+	StrategyID         string   `json:"strategy_id"`
+	GroupOpenIDs       []string `json:"group_openids"`        // 关联群 openid（创建时用 group_openids 才返回）
+	GroupIDs           []string `json:"group_ids"`            // 关联 QQ 群号（创建时用 group_ids 才返回）
+	WhitelistUserCount int      `json:"whitelist_user_count"` // 白名单号码数量估算值（可能有少量误差）
+	IsEnable           string   `json:"is_enable"`            // on 启用 / off 关闭
+	ExpireAt           string   `json:"expire_at"`            // 过期时间（RFC3339）
+	CreatedAt          string   `json:"created_at"`           // 创建时间（RFC3339）
+	UpdatedAt          string   `json:"updated_at"`           // 最近更新（RFC3339）
+	Remark             string   `json:"remark"`               // 备注
+}
+
+// ListGroupJoinApprovalStrategies 拉取入群自动审批策略列表（自动翻页聚合）。
+// 注意路径不带群 id——策略是机器人维度的，一个策略可关联多个群；60 QPM。
+func (b *Bot) ListGroupJoinApprovalStrategies(ctx context.Context) ([]JoinApprovalStrategy, error) {
+	var out []JoinApprovalStrategy
+	cursor := ""
+	for {
+		path := "/v2/groups/join_approval_strategy?limit=50"
+		if cursor != "" {
+			path += "&cursor=" + url.QueryEscape(cursor)
+		}
+		body, err := b.qqAPI(ctx, http.MethodGet, path, nil)
+		if err != nil {
+			return nil, err
+		}
+		var page struct {
+			Strategies []JoinApprovalStrategy `json:"strategies"`
+			NextCursor string                 `json:"next_cursor"`
+		}
+		if err := json.Unmarshal(body, &page); err != nil {
+			return nil, fmt.Errorf("解析入群自动审批策略列表: %w", err)
+		}
+		out = append(out, page.Strategies...)
+		if page.NextCursor == "" || len(page.Strategies) == 0 {
 			return out, nil
 		}
 		cursor = page.NextCursor

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/tencent-connect/botgo"
 	"github.com/tencent-connect/botgo/dto"
@@ -17,6 +18,8 @@ import (
 	"github.com/tencent-connect/botgo/token"
 	"github.com/tidwall/gjson"
 	"golang.org/x/oauth2"
+
+	"qqbot/internal/imgstore"
 )
 
 // Config 是连接官方机器人所需的配置。
@@ -27,10 +30,11 @@ type Config struct {
 
 // Options 是行为配置。
 type Options struct {
-	Prefixes   []string // 命令前缀（可选；命中前缀会去掉再匹配）
-	EnableHelp bool     // 自动注册 /help，默认 true
-	HelpName   string   // help 命令名，默认 "help"
-	Owners     []string // 主人 openid 列表（OwnerOnly 命令仅他们可用；空 = 无人可用）
+	Prefixes   []string       // 命令前缀（可选；命中前缀会去掉再匹配）
+	EnableHelp bool           // 自动注册 /help，默认 true
+	HelpName   string         // help 命令名，默认 "help"
+	Owners     []string       // 主人 openid 列表（OwnerOnly 命令仅他们可用；空 = 无人可用）
+	MediaHost  *imgstore.Host // 媒体托管：语音自动转码后的 silk 经它发布公网 URL（可选）
 }
 
 // Option 用于 New 的可选参数。
@@ -46,6 +50,10 @@ func WithOwners(ids ...string) Option { return func(o *Options) { o.Owners = ids
 // WithHelp 开关自动 /help。
 func WithHelp(enable bool) Option { return func(o *Options) { o.EnableHelp = enable } }
 
+// WithMediaHost 配置媒体托管（图床）：非 silk 语音自动转码后的产物经它发布公网 URL。
+// 未配置时仅能直接发送已是 silk 且自带公网 URL 的语音。
+func WithMediaHost(h *imgstore.Host) Option { return func(o *Options) { o.MediaHost = h } }
+
 // Bot 是基于官方 botgo 的插件框架。
 type Bot struct {
 	cfg      Config
@@ -57,6 +65,7 @@ type Bot struct {
 
 	tokenSource oauth2.TokenSource // 在 Run 中就绪（发图上传富媒体用）
 	appID       string             // 在 Run 中就绪（上传富媒体 X-Union-Appid 头）
+	mediaHost   *imgstore.Host     // 媒体托管（WithMediaHost；语音转码产物发布公网 URL 用）
 
 	mu          sync.RWMutex
 	cmds        []*Command
@@ -77,6 +86,8 @@ type Bot struct {
 
 	seq       atomic.Uint32
 	startOnce sync.Once
+	selfMu    sync.Mutex // 保护 selfID（Me() 不在锁内做，失败不缓存、下次重试）
+	selfID    string     // 机器人自身 openid（Mentions() 排除自己用；空 = 未知，不排除）
 }
 
 // New 创建一个 Bot。
@@ -105,13 +116,14 @@ func New(cfg Config, opts ...Option) *Bot {
 	}
 
 	return &Bot{
-		cfg:      cfg,
-		opts:     o,
-		prefixes: prefixes,
-		helpName: o.HelpName,
-		owners:   owners,
-		cmdIndex: map[string]*Command{},
-		state:    newStateStore(),
+		cfg:       cfg,
+		opts:      o,
+		prefixes:  prefixes,
+		helpName:  o.HelpName,
+		owners:    owners,
+		mediaHost: o.MediaHost,
+		cmdIndex:  map[string]*Command{},
+		state:     newStateStore(),
 	}
 }
 
@@ -123,6 +135,31 @@ func (b *Bot) IsOwner(userID string) bool {
 
 // NC 返回底层 openapi.OpenAPI（需要直接调官方接口时用）。连接前为 nil。
 func (b *Bot) NC() openapi.OpenAPI { return b.api }
+
+// selfOpenID 返回机器人自身的 openid（Me() 拉取后缓存；失败不缓存，下次重试）。
+// api 未就绪或拉取失败返回空（此时 Mentions() 不排除自身）。
+func (b *Bot) selfOpenID() string {
+	b.selfMu.Lock()
+	id := b.selfID
+	b.selfMu.Unlock()
+	if id != "" || b.api == nil {
+		return id
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	u, err := b.api.Me(ctx)
+	if err != nil {
+		log.Printf("bot: 获取自身信息失败（Mentions 将包含机器人自身，稍后重试）: %v", err)
+		return ""
+	}
+	if u == nil || u.ID == "" {
+		return ""
+	}
+	b.selfMu.Lock()
+	b.selfID = u.ID
+	b.selfMu.Unlock()
+	return u.ID
+}
 
 // StartHook 是启动钩子：在 Run 中 api 就绪后触发（ctx 是 Run 的 ctx，随停止而取消）。
 // 适合做「机器人已上线」通知等一次性初始化。
@@ -397,7 +434,27 @@ func (b *Bot) fromMessage(ctx context.Context, source string, m *dto.Message, at
 		ts:        string(m.Timestamp),
 		atBot:     atBot,
 		images:    extractImages(m.Attachments),
+		mentions:  extractMentions(m.Mentions),
 	}
+}
+
+// extractMentions 把事件的 mentions（被 @ 用户）转成 []Mention（空 id 跳过）。
+// 自身是否在列表里由 Mentions() 取值时按 selfOpenID 排除（此处无法判断哪个是自己）。
+func extractMentions(us []*dto.User) []Mention {
+	if len(us) == 0 {
+		return nil
+	}
+	out := make([]Mention, 0, len(us))
+	for _, u := range us {
+		if u == nil || u.ID == "" {
+			continue
+		}
+		out = append(out, Mention{ID: u.ID, Username: u.Username})
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // extractImages 从附件中筛出图片（content_type 以 image/ 开头，或文件名是图片扩展名）。

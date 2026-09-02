@@ -28,6 +28,7 @@ import (
 	"github.com/joho/godotenv"
 
 	"qqbot/internal/bot"
+	"qqbot/internal/imgstore"
 	"qqbot/internal/memory"
 	"qqbot/internal/scheduler"
 	"qqbot/internal/utils"
@@ -48,12 +49,24 @@ func main() {
 		log.Fatal("请在 .env 中配置 QQBOT_APP_ID 和 QQBOT_APP_SECRET（去 q.qq.com 后台获取）")
 	}
 
+	// 图床（QQ 富媒体是 URL 模式，本地媒体都得经它转公网 URL）：
+	// 生图、send_image 本地文件、语音自动转码产物共用。
+	// 两种模式 .env 切换：IMGHOST_LOCAL_DIR 非空 → 本地直存（写盘 + BaseURL 拼公网地址，
+	// 适合 bot 与 web 服务同机，如公网服务器 nginx 映射该目录）；为空 → 远端图床上传。
+	imgHost := &imgstore.Host{
+		BaseURL: utils.EnvOr("IMGHOST_BASE_URL", ""),
+		Token:   utils.EnvOr("IMGHOST_TOKEN", ""),
+		Dir:     utils.EnvOr("IMGHOST_LOCAL_DIR", ""),
+	}
+
 	b := bot.New(bot.Config{AppID: appID, AppSecret: appSecret},
 		// 兼容旧变量名 BOT_PREFIX（单数）；BOT_PREFIXES 优先。
 		bot.WithPrefixes(parsePrefixes(utils.EnvOr("BOT_PREFIXES", utils.EnvOr("BOT_PREFIX", "/")))...),
 		// 主人 openid（BOT_OWNERS，逗号分隔）：OwnerOnly 命令（如 /webhook）仅主人可用。
 		// 自己的 openid 用 /id 命令查。fail-closed：不配置则这些命令无人可用。
 		bot.WithOwners(utils.SplitList(os.Getenv("BOT_OWNERS"))...),
+		// 语音自动转码产物经图床发布公网 URL（未配图床则只能发已是 silk 的 URL）。
+		bot.WithMediaHost(imgHost),
 	)
 	if len(utils.SplitList(os.Getenv("BOT_OWNERS"))) > 0 {
 		log.Println("[main] 已配置主人，OwnerOnly 命令（如 /webhook）仅主人可用")
@@ -115,6 +128,7 @@ func main() {
 		plugins.NewWebhookFromEnv(),
 		plugins.NewWelcomeFromEnv(),
 		plugins.NewJoinReviewFromEnv(),
+		plugins.NewMuteFromEnv(),
 	)
 
 	installMenu(b)
@@ -135,7 +149,7 @@ func main() {
 
 	// Agent 兜底：未命中命令的消息交给 agent（工具循环/多轮记忆/压缩/技能/MCP，
 	// 装配细节见 setup.go）；配置了 AI_API_KEY 才启用。
-	ag, closeAgent := setupAgent(b, mem, imgbedCli, imgbedMax)
+	ag, closeAgent := setupAgent(b, mem, imgbedCli, imgbedMax, imgHost)
 	defer closeAgent()
 
 	// 定时任务接线：调度循环（OnStart 启动）+ agent.run 处理器 + /task 命令。

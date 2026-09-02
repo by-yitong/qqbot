@@ -7,9 +7,15 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"path"
+	"strings"
+	"time"
 
 	"github.com/tencent-connect/botgo/dto"
 	"github.com/tidwall/gjson"
+
+	"qqbot/internal/audio"
 )
 
 // ErrChannelImageUnsupported 频道发图 v1 不支持（仅群/私聊）。
@@ -86,6 +92,25 @@ func (b *Bot) SendC2CVideo(ctx context.Context, userID, msgAnchor, videoURL stri
 	return b.sendRichMedia(ctx, false, userID, msgAnchor, 2, videoURL)
 }
 
+// SendGroupVoice 发群语音（file_type=3，URL 模式）。官方要求 silk（QQ 原生语音格式）；
+// voiceURL 指向 mp3/wav 时自动转码（下载→转 silk→图床发布公网 URL），.silk 直接透传。
+func (b *Bot) SendGroupVoice(ctx context.Context, groupID, msgAnchor, voiceURL string) (string, error) {
+	url, err := b.ensureSilkURL(ctx, voiceURL)
+	if err != nil {
+		return "", err
+	}
+	return b.sendRichMedia(ctx, true, groupID, msgAnchor, 3, url)
+}
+
+// SendC2CVoice 发私聊语音（同 SendGroupVoice 语义）。
+func (b *Bot) SendC2CVoice(ctx context.Context, userID, msgAnchor, voiceURL string) (string, error) {
+	url, err := b.ensureSilkURL(ctx, voiceURL)
+	if err != nil {
+		return "", err
+	}
+	return b.sendRichMedia(ctx, false, userID, msgAnchor, 3, url)
+}
+
 // uploadRichMedia 按 URL 模式上传富媒体到群或 C2C，返回 file_info（用于 MsgType=7 发送）。
 // fileType: 1图片/2视频/3语音。imageURL 须公网可达（QQ 自行下载）。
 //
@@ -142,6 +167,70 @@ func (b *Bot) uploadRichMedia(ctx context.Context, group bool, openID string, fi
 		return "", fmt.Errorf("上传响应缺少 file_info: %s", truncateStr(string(respBody), 300))
 	}
 	return fileInfo, nil
+}
+
+// 语音转码相关：下载源音频的客户端与大小上限（防超大文件拖垮内存）。
+var voiceHTTP = &http.Client{Timeout: 60 * time.Second}
+
+const maxVoiceBytes = 16 << 20 // 16MB，约几分钟语音的 mp3
+
+// ensureSilkURL 确保语音 URL 指向 QQ 可播的 silk：后缀 .silk 直接透传；
+// 否则下载源音频（mp3/wav，按后缀或内容嗅探）→ audio.ToSilk 转码 →
+// 经图床（WithMediaHost）发布公网 URL（QQ 是 URL 模式下载，转码产物必须先能被公网取到）。
+func (b *Bot) ensureSilkURL(ctx context.Context, voiceURL string) (string, error) {
+	if strings.EqualFold(urlExt(voiceURL), "silk") {
+		return voiceURL, nil
+	}
+	if b.mediaHost == nil || !b.mediaHost.Configured() {
+		return "", fmt.Errorf("语音自动转码需要图床托管转码产物（未配置 IMGHOST_BASE_URL）")
+	}
+	data, err := downloadFile(ctx, voiceURL, maxVoiceBytes)
+	if err != nil {
+		return "", fmt.Errorf("下载音频失败: %w", err)
+	}
+	silk, err := audio.ToSilk(data, urlExt(voiceURL))
+	if err != nil {
+		return "", fmt.Errorf("音频转 silk 失败: %w", err)
+	}
+	pub, err := b.mediaHost.Upload(ctx, silk, "silk")
+	if err != nil {
+		return "", fmt.Errorf("发布转码后的 silk 失败: %w", err)
+	}
+	return pub, nil
+}
+
+// urlExt 取 URL 路径的扩展名（去点、转小写；无扩展返回空）。
+func urlExt(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return ""
+	}
+	return strings.ToLower(strings.TrimPrefix(path.Ext(u.Path), "."))
+}
+
+// downloadFile 下载 URL 内容，超过 max 字节报错（LimitReader 多读 1 字节以区分截断）。
+func downloadFile(ctx context.Context, rawURL string, max int64) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := voiceHTTP.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, truncateStr(string(body), 200))
+	}
+	data, err := io.ReadAll(io.LimitReader(resp.Body, max+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > max {
+		return nil, fmt.Errorf("超过大小上限 %d MB", max>>20)
+	}
+	return data, nil
 }
 
 // truncateStr 截断字符串到 n 字符（便于错误日志）。

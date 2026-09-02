@@ -34,10 +34,11 @@ type Ctx struct {
 	messageID string // 消息 id（回复锚点）
 	ts        string // 消息时间（原始字符串，如 2026-08-14T12:00:02+08:00）
 
-	aborted bool    // 是否已 Abort：阻止后续关键词/监听器执行
-	atBot   bool    // 是否 @ 了机器人（群/频道 @消息为 true；全量群消息/私聊为 false）
-	quote   string  // 被引用的消息文本（引用回复时，来自 msg_elements）
-	images  []Image // 用户发送的图片附件（来自 attachments，按顺序）
+	aborted  bool      // 是否已 Abort：阻止后续关键词/监听器执行
+	atBot    bool      // 是否 @ 了机器人（群/频道 @消息为 true；全量群消息/私聊为 false）
+	quote    string    // 被引用的消息文本（引用回复时，来自 msg_elements）
+	images   []Image   // 用户发送的图片附件（来自 attachments，按顺序）
+	mentions []Mention // 消息里被 @ 的用户（来自事件 mentions 数组，按出现顺序）
 }
 
 // Image 是用户在消息里发送的一张图片附件。
@@ -47,6 +48,12 @@ type Image struct {
 	Filename    string // 原始文件名
 	Width       int    // 像素宽
 	Height      int    // 像素高
+}
+
+// Mention 是消息里被 @ 的一个用户（来自事件 mentions 数组）。
+type Mention struct {
+	ID       string // 用户 openid
+	Username string // 群昵称（可能为空）
 }
 
 // NewEventCtx 按事件字段构造一条消息上下文（程序化/测试用；正常消息由框架在事件解析时构造）。
@@ -91,6 +98,22 @@ func (c *Ctx) Quote() string { return c.quote }
 
 // Images 返回用户在当前消息里发送的图片（按附件顺序）；无图片返回 nil。
 func (c *Ctx) Images() []Image { return c.images }
+
+// Mentions 返回本条消息里被 @ 的用户（按出现顺序；机器人自身已排除，
+// 未取到自身 openid 时不排除）。群里「@某人 触发命令」用它定位目标，
+// 如「/禁言 @某人 10分钟」（cleanContent 会把 <@openid> 从文本里剥掉，
+// 目标只能从这里拿）。非群消息通常为空。
+func (c *Ctx) Mentions() []Mention {
+	self := c.Bot.selfOpenID()
+	out := make([]Mention, 0, len(c.mentions))
+	for _, m := range c.mentions {
+		if self != "" && m.ID == self {
+			continue
+		}
+		out = append(out, m)
+	}
+	return out
+}
 
 // Text 返回消息纯文本。
 func (c *Ctx) Text() string { return c.Content }
@@ -180,6 +203,18 @@ func (c *Ctx) ReplyVideo(videoURL string) (string, error) {
 		return c.Bot.SendGroupVideo(c.Context, c.groupID, c.messageID, videoURL)
 	case "c2c":
 		return c.Bot.SendC2CVideo(c.Context, c.userID, c.messageID, videoURL)
+	default:
+		return "", ErrChannelImageUnsupported
+	}
+}
+
+// ReplyVoice 以语音回复当前消息（file_type=3，URL 模式；音频须为 silk 格式）。仅群/私聊支持。
+func (c *Ctx) ReplyVoice(voiceURL string) (string, error) {
+	switch c.Source {
+	case "group":
+		return c.Bot.SendGroupVoice(c.Context, c.groupID, c.messageID, voiceURL)
+	case "c2c":
+		return c.Bot.SendC2CVoice(c.Context, c.userID, c.messageID, voiceURL)
 	default:
 		return "", ErrChannelImageUnsupported
 	}

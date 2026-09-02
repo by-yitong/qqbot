@@ -25,7 +25,8 @@ import (
 //
 // imgbedCli/imgbedMax 是图床插件（/图床 命令）已建的 client，agent 的
 // upload_image 工具与之共用同一 client 与大小上限；nil 表示图床未启用。
-func setupAgent(b *bot.Bot, mem *memory.Store, imgbedCli *imgbed.Client, imgbedMax int64) (*agent.Agent, func()) {
+// imgHost 是 main 构造的媒体托管（发图与 bot 语音转码共用同一实例）。
+func setupAgent(b *bot.Bot, mem *memory.Store, imgbedCli *imgbed.Client, imgbedMax int64, imgHost *imgstore.Host) (*agent.Agent, func()) {
 	key := os.Getenv("AI_API_KEY")
 	if key == "" {
 		return nil, func() {}
@@ -56,16 +57,6 @@ func setupAgent(b *bot.Bot, mem *memory.Store, imgbedCli *imgbed.Client, imgbedM
 	// 长期记忆检索（search_history）：有记忆库才注册。
 	if mem != nil {
 		reg.Register(&tools.HistorySearch{Store: mem})
-	}
-
-	// 图床（QQ 富媒体是 URL 模式，本地图片都得经它转公网 URL）：
-	// 生图工具、send_image 的本地文件（如浏览器截图）共用。
-	// 两种模式 .env 切换：IMGHOST_LOCAL_DIR 非空 → 本地直存（写盘 + BaseURL 拼公网地址，
-	// 适合 bot 与 web 服务同机，如公网服务器 nginx 映射该目录）；为空 → 远端图床上传。
-	imgHost := &imgstore.Host{
-		BaseURL: utils.EnvOr("IMGHOST_BASE_URL", ""),
-		Token:   utils.EnvOr("IMGHOST_TOKEN", ""),
-		Dir:     utils.EnvOr("IMGHOST_LOCAL_DIR", ""),
 	}
 
 	// 生图（OpenAI 协议，文生图/图生图）；有 IMAGE_API_KEY 才注册。
