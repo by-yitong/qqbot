@@ -59,6 +59,16 @@ func setupAgent(b *bot.Bot, mem *memory.Store, imgbedCli *imgbed.Client, imgbedM
 		reg.Register(&tools.HistorySearch{Store: mem})
 	}
 
+	// 群管工具（成员查询/踢人/黑名单）：与 /成员 /踢 等命令同一批官方接口，
+	// 随 MEMBER_ENABLE 一起启停。踢人门禁：管理员/主人直接执行；普通成员举报
+	// 恶意内容须带消息原文证据，经记忆库核实才执行（见 tools/group.go）。
+	if utils.EnvInt("MEMBER_ENABLE", 0) == 1 {
+		reg.Register(&tools.GroupMembers{API: b})
+		reg.Register(&tools.KickGroupMember{API: b, Mem: mem})
+		reg.Register(&tools.GroupBlacklist{API: b})
+		log.Println("[agent] 已启用群管工具（group_members / kick_group_member / group_blacklist；踢人：管理员直接执行，普通成员须提供消息原文证据核实）")
+	}
+
 	// 生图（OpenAI 协议，文生图/图生图）；有 IMAGE_API_KEY 才注册。
 	// 网关若只回 base64，工具解码后上传图床拿公网 URL，再由 send_image 经 URL 模式发出。
 	if imgKey := os.Getenv("IMAGE_API_KEY"); imgKey != "" {

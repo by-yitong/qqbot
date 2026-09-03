@@ -122,6 +122,9 @@ bot：[图：戴红蝴蝶结的猫]    ← 最终回复已包含补充
 | `generate_image` | AI 生图（OpenAI 协议，文生图/图生图；`IMAGE_API_KEY` 配置） | 开（配 key） |
 | `send_image` | 向当前会话发图片（AI 给 URL 或 `genimg:` 引用，自主下载+上传腾讯+发富媒体） | 开 |
 | `search_history` | 查本会话长期聊天记录（关键词/说话人/天数；群隔离） | 开（配记忆库） |
+| `group_members` | 查本群成员列表/按昵称搜（昵称/角色/openid/入群时间），把「某个人」定位到 openid | 开（`MEMBER_ENABLE=1`） |
+| `kick_group_member` | 把发恶意内容（色情/诈骗/刷屏广告）的成员移出群。**门禁**：群主/管理员/主人直接执行；普通成员举报必须带 `evidence`=对方消息原文片段，工具到记忆库核实「对方近 24h 确实发过」才执行（防诬告/防幻觉）；群主/管理员/机器人目标一律拒绝 | 开（`MEMBER_ENABLE=1`） |
+| `group_blacklist` | 群黑名单查看（list，所有人）/ 增删（add/del，仅群主/管理员/主人） | 开（`MEMBER_ENABLE=1`） |
 | `read_skill` | 按 name 加载某技能的详细正文（配合懒加载技能索引） | 开 |
 | `skill_add` / `mcp_add` | 运行时加载技能 / 连接 MCP server | 开 |
 | `bash` | 执行 shell（⚠️ RCE 风险） | **关**，需 `AGENT_ENABLE_BASH=1` + 白名单 |

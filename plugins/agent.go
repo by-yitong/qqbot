@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"qqbot/internal/agent"
+	"qqbot/internal/agent/tools"
 	"qqbot/internal/bot"
 	"qqbot/internal/imgstore"
 	"qqbot/internal/memory"
@@ -258,6 +259,16 @@ func (p *AgentPlugin) handle(c *bot.Ctx) {
 	}
 	// 当前聊天信息注入：create_task 等工具据此拿到定时任务的默认发送目标与创建者。
 	runCtx = scheduler.WithChatInfo(runCtx, chatInfoOf(c))
+	// 群聊发起人身份注入：群管工具（group_members / kick_group_member / group_blacklist）
+	// 的权限门禁依据（管理员直接操作；普通成员踢人须证据核实，见 tools/group.go）。
+	if c.IsGroup() {
+		runCtx = tools.WithGroupActor(runCtx, tools.GroupActor{
+			UserID:     c.UserID(),
+			GroupID:    c.GroupID(),
+			MemberRole: c.MemberRole(),
+			IsOwner:    c.IsOwner(),
+		})
+	}
 
 	reply, err := p.ag.Run(runCtx, key, question, opts...)
 	if err != nil {
