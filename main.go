@@ -129,6 +129,7 @@ func main() {
 		plugins.NewWelcomeFromEnv(),
 		plugins.NewJoinReviewFromEnv(),
 		plugins.NewMuteFromEnv(),
+		plugins.NewMemberFromEnv(),
 	)
 
 	installMenu(b)

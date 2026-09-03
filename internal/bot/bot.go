@@ -344,8 +344,10 @@ func (b *Bot) Run(ctx context.Context) error {
 
 // --- botgo 事件入口 -> *Ctx ---
 
-func (b *Bot) onGroupAtMessage(_ *dto.WSPayload, data *dto.WSGroupATMessageData) error {
-	b.dispatch(b.fromMessage(context.Background(), "group", (*dto.Message)(data), true))
+func (b *Bot) onGroupAtMessage(payload *dto.WSPayload, data *dto.WSGroupATMessageData) error {
+	c := b.fromMessage(context.Background(), "group", (*dto.Message)(data), true)
+	b.EnrichGroupRoles(c, payload.RawMessage)
+	b.dispatch(c)
 	return nil
 }
 
@@ -372,8 +374,43 @@ func (b *Bot) onGroupMessage(_ *dto.WSPayload, msg []byte) error {
 	atBot := gjson.Get(string(msg), "d.mentions.#(is_you==true)").Exists()
 	c := b.fromMessage(context.Background(), "group", &m, atBot)
 	c.quote = extractQuote(msg) // 引用回复时，被引用的原文在 msg_elements 里
+	b.EnrichGroupRoles(c, msg)
 	b.dispatch(c)
 	return nil
+}
+
+// EnrichGroupRoles 从群消息事件的原始 payload 补齐 botgo v0.2.1 dto 丢弃的群角色字段：
+//
+//   - 发送者角色 d.author.member_role → Ctx.MemberRole() / IsGroupAdmin()（AdminOnly 权限判断用）；
+//   - 被 @ 者的角色与机器人标记 d.mentions[].member_role / bot → Mention.Role / Mention.Bot
+//     （如 /踢 前置校验 @ 的是不是群主/管理员）。
+//
+// 官方 2026-08 起随群消息事件下发；两种群消息入口（GROUP_MESSAGE_CREATE /
+// GROUP_AT_MESSAGE_CREATE）均自动调用。raw 为空或字段缺失时静默跳过（保持零值，
+// AdminOnly 回落为仅主人）。导出以便测试构造带角色的场景。
+func (b *Bot) EnrichGroupRoles(c *Ctx, raw []byte) {
+	if len(raw) == 0 || c == nil {
+		return
+	}
+	if r := gjson.GetBytes(raw, "d.author.member_role"); r.Exists() {
+		c.memberRole = r.String()
+	}
+	gjson.GetBytes(raw, "d.mentions").ForEach(func(_, m gjson.Result) bool {
+		id := m.Get("member_openid").String()
+		if id == "" {
+			id = m.Get("id").String()
+		}
+		if id == "" {
+			return true
+		}
+		for i := range c.mentions {
+			if c.mentions[i].ID == id {
+				c.mentions[i].Role = m.Get("member_role").String()
+				c.mentions[i].Bot = m.Get("bot").Bool()
+			}
+		}
+		return true
+	})
 }
 
 // extractQuote 从群消息的 msg_elements 提取被引用消息的文本（引用回复场景）。

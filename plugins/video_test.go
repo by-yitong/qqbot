@@ -28,7 +28,7 @@ func TestShareLinkRE(t *testing.T) {
 	}
 }
 
-func TestParseDouyin(t *testing.T) {
+func TestParseDouyinXZG(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		if r.URL.Path != "/douyin/" {
@@ -45,7 +45,7 @@ func TestParseDouyin(t *testing.T) {
 	}))
 	defer srv.Close()
 	p := &VideoPlugin{apiBase: srv.URL}
-	res, err := p.parseDouyin(context.Background(), "https://v.douyin.com/4wZAPduuQ2c/")
+	res, err := p.parseDouyinXZG(context.Background(), "https://v.douyin.com/4wZAPduuQ2c/")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -67,12 +67,12 @@ func TestParseDouyinErrCode(t *testing.T) {
 	}))
 	defer srv.Close()
 	p := &VideoPlugin{apiBase: srv.URL}
-	if _, err := p.parseDouyin(context.Background(), "https://v.douyin.com/x/"); err == nil || !strings.Contains(err.Error(), "链接失效") {
+	if _, err := p.parseDouyinXZG(context.Background(), "https://v.douyin.com/x/"); err == nil || !strings.Contains(err.Error(), "链接失效") {
 		t.Errorf("期望 code 错误, got %v", err)
 	}
 }
 
-func TestParseDouyinGallery(t *testing.T) {
+func TestParseDouyinGalleryXZG(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprint(w, `{"code":0,"msg":"ok","data":{"jx":{"type":"图集"},"author":{"name":"a"},
@@ -80,7 +80,7 @@ func TestParseDouyinGallery(t *testing.T) {
 	}))
 	defer srv.Close()
 	p := &VideoPlugin{apiBase: srv.URL}
-	res, err := p.parseDouyin(context.Background(), "https://v.douyin.com/g/")
+	res, err := p.parseDouyinXZG(context.Background(), "https://v.douyin.com/g/")
 	if err != nil {
 		t.Fatal(err)
 	}

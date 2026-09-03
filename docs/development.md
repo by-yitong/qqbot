@@ -118,10 +118,12 @@ b.Command("echo", echo).
 	Hidden().                 // 不出现在 /help
 	RequireAtOrPrefix().      // 必须带前缀或 @机器人 才触发（默认关：裸文本也可命中）
 	OwnerOnly().              // 仅主人可用（BOT_OWNERS 配置的 openid；不配置 = 无人可用）
+	AdminOnly().              // 仅群主/群管理员或主人可用（member_role 来自群消息事件下发）
 	GroupOnly()               // 作用域：GroupOnly/PrivateOnly/ChannelOnly
 ```
 - 命令触发：**默认裸文本也可命中**——发送 `xxx` 等价 `.xxx`（群里不用 @ 不用前缀，指令面板/免前缀直达都靠它）。`.RequireAtOrPrefix()` 可收紧成必须前缀或 @（名字是常用词、易被群聊误触的命令建议收紧；AI 兜底不走命令表，群消息本来就要求 @ 或前缀）。命中命令后不再触发关键词/监听器。
 - **主人权限**：`bot.New` 时 `bot.WithOwners(openid...)`（`.env` 配 `BOT_OWNERS`，逗号分隔）设定主人；`.OwnerOnly()` 的命令仅主人可用（如 `/webhook`），且不进非主人视角的 `/help` 与自动菜单/面板（面板对所有用户可见）。fail-closed：不配置主人则这类命令对所有人拒绝。`c.IsOwner()` 可在任意 handler 里判断发送者是否主人；自己的 openid 用 `/id` 命令查。
+- **管理员权限**：`.AdminOnly()` 的命令仅**群主/群管理员或主人**可用（如 `/踢`）。角色来自官方群消息事件下发的 `member_role`（`author.member_role`，botgo v0.2.1 的 dto 未解析，框架在群消息入口经 `b.EnrichGroupRoles` 从原始 payload 补齐）；主人恒可用，非群聊或角色未知时只剩主人可用（fail-closed）。`c.IsGroupAdmin()` / `c.MemberRole()` 可在 handler 里判断；被 @ 者的角色与机器人标记在 `c.Mentions()` 返回项的 `.Role` / `.Bot` 上。
 - `Args`：`c.Args.Join()` 取整段、`c.Args.Get(i)` 取第 i 个参数。
 
 ### `*bot.Ctx` 便捷方法

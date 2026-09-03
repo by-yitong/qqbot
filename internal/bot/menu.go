@@ -245,7 +245,7 @@ func DefaultMenuConfig() MenuConfig {
 // AutoMenuConfig 按当前已注册命令自动生成发布配置：每个非隐藏、未 HideBotMenu、
 // 未 RequireAtOrPrefix（面板填入的是裸命令名，点了不会命中）的命令进 C2C 底部菜单
 // （send_message，点击填入命令名）和群指令面板（command 项）。
-// OwnerOnly 命令不进面板/菜单——面板对所有用户可见，主人命令不该出现在那里。
+// OwnerOnly / AdminOnly 命令不进面板/菜单——面板对所有用户可见，受限命令不该出现在那里。
 // 在发布时（OnStart / .menu apply）调用，保证所有命令都已注册完毕。
 func (b *Bot) AutoMenuConfig() MenuConfig {
 	b.mu.RLock()
@@ -253,7 +253,7 @@ func (b *Bot) AutoMenuConfig() MenuConfig {
 	cfg := MenuConfig{}
 	panel := Panel{Remark: AutoPanelRemark}
 	for _, c := range b.cmds {
-		if c.hidden || c.hideBotMenu || c.requireAt || c.ownerOnly {
+		if c.hidden || c.hideBotMenu || c.requireAt || c.ownerOnly || c.adminOnly {
 			continue
 		}
 		if len(cfg.Menu.Items) < 10 { // 菜单上限 10 项

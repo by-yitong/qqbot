@@ -37,8 +37,9 @@ type Command struct {
 	usage       string
 	hidden      bool
 	hideBotMenu bool
-	requireAt   bool     // 必须命中前缀或 @机器人 才触发（默认 false：裸文本也命中）
-	ownerOnly   bool     // 仅主人（WithOwners 配置的 openid）可用；未配置主人 = 无人可用
+	requireAt   bool // 必须命中前缀或 @机器人 才触发（默认 false：裸文本也命中）
+	ownerOnly   bool // 仅主人（WithOwners 配置的 openid）可用；未配置主人 = 无人可用
+	adminOnly   bool // 仅群主/群管理员或主人可用（角色来自事件下发的 member_role）
 	handler     CommandHandler
 	mw          []Middleware
 	sc          scope
@@ -75,6 +76,13 @@ func (c *Command) RequireAtOrPrefix() *Command { c.requireAt = true; return c }
 // fail-closed：未配置主人时对所有人拒绝。此类命令同时不进 /help（非主人视角）
 // 与自动菜单/指令面板（面板所有用户可见，主人命令不该出现在那里）。
 func (c *Command) OwnerOnly() *Command { c.ownerOnly = true; return c }
+
+// AdminOnly 限制命令仅群主/群管理员或主人可用：角色取官方群消息事件下发的
+// member_role（botgo v0.2.1 的 dto 未解析，框架经原始 payload 补齐，见
+// Bot.EnrichGroupRoles），主人（BOT_OWNERS）恒可用。非群聊或角色未知
+// （旧事件/未下发）时只剩主人可用——fail-closed。此类命令不进 /help
+// （非管理员视角）与自动菜单/指令面板。
+func (c *Command) AdminOnly() *Command { c.adminOnly = true; return c }
 
 // Use 为该命令追加专属中间件（在作用域检查之后执行）。
 func (c *Command) Use(mw ...Middleware) *Command { c.mw = append(c.mw, mw...); return c }
@@ -187,6 +195,10 @@ func (b *Bot) scopeMiddleware(cmd *Command) Middleware {
 				}
 				return
 			}
+			if cmd.adminOnly && !c.adminOrOwner() {
+				_, _ = c.ReplyText("该命令仅群主/群管理员或主人可用")
+				return
+			}
 			switch {
 			case cmd.sc.groupOnly && !c.IsGroup():
 				_, _ = c.ReplyText("该命令仅在群聊可用")
@@ -203,18 +215,19 @@ func (b *Bot) scopeMiddleware(cmd *Command) Middleware {
 	}
 }
 
-// Help 返回所有非隐藏命令的帮助文本（不过滤主人命令；按身份过滤用 HelpFor）。
+// Help 返回所有非隐藏命令的帮助文本（不按身份过滤；按身份过滤用 HelpFor）。
 func (b *Bot) Help() string {
-	return b.help(false)
+	return b.help(nil)
 }
 
-// HelpFor 返回面向 c 发送者的帮助文本：非主人看不到 OwnerOnly 命令。
+// HelpFor 返回面向 c 发送者的帮助文本：非主人看不到 OwnerOnly 命令，
+// 非管理员（且非主人）看不到 AdminOnly 命令。
 func (b *Bot) HelpFor(c *Ctx) string {
-	return b.help(!c.IsOwner())
+	return b.help(c)
 }
 
-// help 生成帮助文本；hideOwner 为 true 时跳过 OwnerOnly 命令。
-func (b *Bot) help(hideOwner bool) string {
+// help 生成帮助文本；viewer 为 nil 时不做身份过滤（内部字段照常跳过 hidden）。
+func (b *Bot) help(viewer *Ctx) string {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 	pref := ""
@@ -224,8 +237,16 @@ func (b *Bot) help(hideOwner bool) string {
 	var sb strings.Builder
 	sb.WriteString("命令列表：\n")
 	for _, c := range b.cmds {
-		if c.hidden || (hideOwner && c.ownerOnly) {
+		if c.hidden {
 			continue
+		}
+		if viewer != nil {
+			if c.ownerOnly && !viewer.IsOwner() {
+				continue
+			}
+			if c.adminOnly && !viewer.adminOrOwner() {
+				continue
+			}
 		}
 		names := pref + c.name
 		if len(c.aliases) > 0 {

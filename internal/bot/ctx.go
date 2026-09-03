@@ -39,6 +39,8 @@ type Ctx struct {
 	quote    string    // 被引用的消息文本（引用回复时，来自 msg_elements）
 	images   []Image   // 用户发送的图片附件（来自 attachments，按顺序）
 	mentions []Mention // 消息里被 @ 的用户（来自事件 mentions 数组，按出现顺序）
+
+	memberRole string // 发送者的群角色（owner/admin/member；官方群消息事件下发，见 EnrichGroupRoles）
 }
 
 // Image 是用户在消息里发送的一张图片附件。
@@ -54,6 +56,8 @@ type Image struct {
 type Mention struct {
 	ID       string // 用户 openid
 	Username string // 群昵称（可能为空）
+	Role     string // 群角色 owner/admin/member（官方事件下发；旧事件可能为空，见 EnrichGroupRoles）
+	Bot      bool   // 是否机器人账号
 }
 
 // NewEventCtx 按事件字段构造一条消息上下文（程序化/测试用；正常消息由框架在事件解析时构造）。
@@ -135,6 +139,21 @@ func (c *Ctx) Username() string { return c.username }
 
 // IsOwner 报告发送者是否主人（WithOwners 配置的 openid 集合；未配置则恒 false）。
 func (c *Ctx) IsOwner() bool { return c.Bot.IsOwner(c.userID) }
+
+// MemberRole 返回发送者在群里的角色（owner 群主 / admin 管理员 / member 普通成员）。
+// 角色由官方群消息事件下发（botgo v0.2.1 的 dto 未解析，框架经原始 payload 补齐，
+// 见 Bot.EnrichGroupRoles）；非群消息或未下发时为空串。
+func (c *Ctx) MemberRole() string { return c.memberRole }
+
+// IsGroupAdmin 报告发送者是否群主或群管理员（按事件下发的 member_role；
+// 仅群消息有意义，私聊/频道恒 false）。
+func (c *Ctx) IsGroupAdmin() bool {
+	return c.IsGroup() && (c.memberRole == MemberRoleOwner || c.memberRole == MemberRoleAdmin)
+}
+
+// adminOrOwner 是 AdminOnly 命令的通过条件：主人恒通过（BOT_OWNERS），
+// 其余按事件下发的群角色——非群聊/角色未知时只剩主人可用（fail-closed）。
+func (c *Ctx) adminOrOwner() bool { return c.IsOwner() || c.IsGroupAdmin() }
 
 // MessageID 返回消息 id（回复锚点；也用作聊天记录去重键）。
 func (c *Ctx) MessageID() string { return c.messageID }

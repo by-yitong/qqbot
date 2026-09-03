@@ -34,10 +34,11 @@ const maxProxyBytes = 200 << 20
 
 // VideoPlugin 短视频解析插件。
 type VideoPlugin struct {
-	apiBase string // 星之阁 API 基址
+	apiBase string // 星之阁 API 基址（抖音兜底源）
 	imgHost *imgstore.Host
-	zsz     *ZszClient   // zhishuzhan 快手解析（可 nil = 快手降级提示）
-	client  *http.Client // 下载视频直链用（独立于 resty，放宽超时）
+	dy      *DouyinClient // 抖音直连解析（主源）
+	zsz     *ZszClient    // zhishuzhan 快手解析（可 nil = 快手降级提示）
+	client  *http.Client  // 下载视频直链用（独立于 resty，放宽超时）
 
 	mu sync.Map // link-hash -> 解析开始时间（去重）
 }
@@ -51,6 +52,7 @@ func NewVideo(imgHost *imgstore.Host) *VideoPlugin {
 	return &VideoPlugin{
 		apiBase: base,
 		imgHost: imgHost,
+		dy:      NewDouyinClient(),
 		zsz:     NewZszClient(),
 		client:  &http.Client{Timeout: 4 * time.Minute},
 	}
@@ -206,7 +208,22 @@ func (p *VideoPlugin) download(ctx context.Context, url string) ([]byte, string,
 	return data, resp.Header.Get("Content-Type"), nil
 }
 
-// ---- 星之阁 抖音解析 ----
+// parseDouyin 抖音解析：直连为主（不依赖第三方，第三方解析站时有停摆），
+// 直连失败再退星之阁；两边都挂才报错，错误信息带上两边原因便于排查。
+func (p *VideoPlugin) parseDouyin(ctx context.Context, link string) (*VideoResult, error) {
+	res, dyErr := p.dy.Parse(ctx, link)
+	if dyErr == nil {
+		return res, nil
+	}
+	log.Printf("[video] 抖音直连解析失败，退星之阁: %v", dyErr)
+	res, xzErr := p.parseDouyinXZG(ctx, link)
+	if xzErr == nil {
+		return res, nil
+	}
+	return nil, fmt.Errorf("抖音直连: %v；星之阁: %v", dyErr, xzErr)
+}
+
+// ---- 星之阁 抖音解析（兜底源） ----
 
 // xzgResp 星之阁 douyin 接口返回结构（按实际样例裁剪）。
 type xzgResp struct {
@@ -239,7 +256,7 @@ type xzgResp struct {
 	} `json:"data"`
 }
 
-func (p *VideoPlugin) parseDouyin(ctx context.Context, link string) (*VideoResult, error) {
+func (p *VideoPlugin) parseDouyinXZG(ctx context.Context, link string) (*VideoResult, error) {
 	var r xzgResp
 	if _, err := utils.HttpClient.R().
 		SetContext(ctx).
