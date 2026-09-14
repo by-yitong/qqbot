@@ -44,7 +44,8 @@ func (p *Happy) Install(b *bot.Bot) {
 	b.Command("一言", p.run).
 		Desc("随机一句话（来自 hitokoto.cn）").
 		Alias("hitokoto", "yy")
-	b.Command("test", p.test)
+	// test 是按钮键盘的开发演示，藏起来不进 /help、指令面板与命令按钮（要试直接发 /test）。
+	b.Command("test", p.test).Hidden().HideBotMenu()
 	if p.sched == nil || p.dailyTarget == "" {
 		return
 	}

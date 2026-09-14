@@ -16,7 +16,9 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strings"
 
+	"github.com/tencent-connect/botgo/dto/keyboard"
 	"github.com/tidwall/gjson"
 )
 
@@ -271,6 +273,61 @@ func (b *Bot) AutoMenuConfig() MenuConfig {
 		cfg.Panels = append(cfg.Panels, PanelReq{Scope: "group", TargetType: "all", Panel: panel})
 	}
 	return cfg
+}
+
+// CommandKeyboard 按当前已注册命令自动生成聊天内的命令按钮键盘，挂在 .帮助/.菜单
+// 的回复上（文字 + 按钮一条消息）。与 AutoMenuConfig 同一套过滤：非隐藏、未
+// HideBotMenu/RequireAtOrPrefix、非 OwnerOnly/AdminOnly。每行 4 个、上限 24 个；
+// 有 Usage（需要补参数，如 .点歌 歌名）的命令点击仅把命令填入输入框（enter=false，
+// 补完参数再发送），无参命令点击直接发送（enter=true）。
+func (b *Bot) CommandKeyboard() *keyboard.MessageKeyboard {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	pref := ""
+	if len(b.prefixes) > 0 {
+		pref = b.prefixes[0]
+	}
+	const perRow, maxBtns = 4, 24
+	var rows []*keyboard.Row
+	var row *keyboard.Row
+	n := 0
+	for _, c := range b.cmds {
+		if c.hidden || c.hideBotMenu || c.requireAt || c.ownerOnly || c.adminOnly {
+			continue
+		}
+		if n >= maxBtns {
+			break
+		}
+		n++
+		if row == nil || len(row.Buttons) >= perRow {
+			row = &keyboard.Row{}
+			rows = append(rows, row)
+		}
+		row.Buttons = append(row.Buttons, &keyboard.Button{
+			ID:         c.name,
+			RenderData: &keyboard.RenderData{Label: truncateStr(c.name, 12), Style: 1},
+			Action: &keyboard.Action{
+				Type:       keyboard.ActionTypeAtBot,
+				Permission: &keyboard.Permission{Type: keyboard.PermissionTypAll},
+				Data:       pref + c.name,
+				Enter:      c.usage == "",
+			},
+		})
+	}
+	return &keyboard.MessageKeyboard{
+		Content: &keyboard.CustomKeyboard{Rows: rows, Style: &keyboard.KeyboardStyle{FontSize: "small"}},
+	}
+}
+
+// MarshalKeyboard 序列化按钮键盘为可直接传给 Ctx.ReplyMarkdownKeyboard 的 JSON：
+// botgo 的 Action.SubscribeData 是值类型（无 omitempty），会输出空对象
+// "subscribe_data":{}，type=2 按钮带它可能被 QQ 参数校验拒掉，这里剥除。
+func MarshalKeyboard(kb *keyboard.MessageKeyboard) (string, error) {
+	raw, err := json.Marshal(kb)
+	if err != nil {
+		return "", err
+	}
+	return strings.ReplaceAll(string(raw), `,"subscribe_data":{}`, ""), nil
 }
 
 // LoadMenuConfig 从 JSON 文件加载发布配置；文件不存在返回 (nil, nil)（用内置默认）。

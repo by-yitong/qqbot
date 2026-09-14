@@ -19,7 +19,7 @@ qqbot/
 │   │   ├── ctx.go           # Ctx（三源：群/频道/私聊）+ ReplyText/Image/Voice + Images()/Mentions()
 │   │   ├── command.go       # Command / Args / 命令匹配 / 作用域 / Help
 │   │   ├── handler.go       # 处理器/中间件类型、监听器、Plugin、Use/UsePlugin
-│   │   ├── media.go         # 发图：下载→上传富媒体→MsgType=7（支持 genimg: 图床引用）；发语音（silk）
+│   │   ├── media.go         # 发图/视频/语音/文件：上传富媒体（file_type 1-4，URL 模式）→MsgType=7；语音 mp3/wav 自动转 silk
 │   │   ├── groupevent.go    # 群成员入群/入群申请事件（GROUP_MEMBER_ADD / GROUP_JOIN_REQUEST）
 │   │   ├── groupmanage.go   # 入群申请审批/列表接口（approval_join_request / join_request_list）
 │   │   ├── groupmute.go     # 群成员禁言接口（restrict_chat_setting）

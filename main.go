@@ -125,11 +125,12 @@ func main() {
 		plugins.NewOnline("AD649FF82C450D9E5BF229974329E36C", "🤖 机器人已上线"),
 		plugins.NewBtFromEnv(),
 		imgbedPlug,
-		plugins.NewWebhookFromEnv(),
+		plugins.NewWebhookFromEnv(imgHost),
 		plugins.NewWelcomeFromEnv(),
 		plugins.NewJoinReviewFromEnv(),
 		plugins.NewMuteFromEnv(),
 		plugins.NewMemberFromEnv(),
+		plugins.NewMusic(),
 	)
 
 	installMenu(b)
@@ -217,21 +218,36 @@ func installMenu(b *bot.Bot) {
 				return
 			}
 			if len(m.Items) == 0 {
-				c.ReplyText("当前未设置菜单。.menu apply 发布 / .menu clear 清除")
+				replyWithCommandButtons(c, "当前未设置菜单。.menu apply 发布 / .menu clear 清除")
 				return
 			}
 			names := make([]string, 0, len(m.Items))
 			for _, it := range m.Items {
 				names = append(names, it.Name)
 			}
-			c.ReplyText("当前菜单：" + strings.Join(names, "、") + "。.menu apply 重新发布 / .menu clear 清除")
+			replyWithCommandButtons(c, "当前菜单："+strings.Join(names, "、")+".menu apply 重新发布 / .menu clear 清除")
 		}
 	}).Desc("管理自定义菜单与指令面板（apply 发布 / clear 清除 / 无参查看）").Alias("菜单")
 
 	// 中文帮助命令（内置 help 之外）：菜单/面板按钮填入的中文词要能直接命中命令。
+	// 回复 = 命令列表 + 全量命令按钮键盘合一条消息（点按钮直达命令；需要参数的
+	// 命令点击只填入输入框）；markdown 被审核拒发时降级纯文本。
 	b.Command("帮助", func(c *bot.Ctx) {
-		c.ReplyText(c.Bot.HelpFor(c))
+		replyWithCommandButtons(c, c.Bot.HelpFor(c))
 	}).Desc("显示命令列表")
+}
+
+// replyWithCommandButtons 把文本与命令按钮键盘合成一条 markdown 消息回复；
+// 失败（按钮序列化/语料审核）降级纯文本。
+func replyWithCommandButtons(c *bot.Ctx, text string) {
+	if raw, err := bot.MarshalKeyboard(c.Bot.CommandKeyboard()); err == nil {
+		if _, err := c.ReplyMarkdownKeyboard(text, raw); err == nil {
+			return
+		} else {
+			log.Printf("[menu] 帮助/菜单按钮发送失败，降级纯文本: %v", err)
+		}
+	}
+	_, _ = c.ReplyText(text)
 }
 
 // parsePrefixes 把 ".|/" 解析成 []string。用 | 分隔：逗号在中英文/全角半角间太容易

@@ -3,6 +3,8 @@ package bot
 import (
 	"bytes"
 	"context"
+	"crypto/md5"
+	"crypto/sha1"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
@@ -12,7 +14,9 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 
 	"golang.org/x/oauth2"
@@ -133,6 +137,152 @@ func TestUploadRichMediaNoToken(t *testing.T) {
 	b := &Bot{} // 无 tokenSource
 	if _, err := b.uploadRichMedia(context.Background(), true, "G", 1, "https://x/a.png"); err == nil {
 		t.Fatal("无 tokenSource 应报错")
+	}
+}
+
+// TestUploadFileChunked 分片上传全流程：mock upload_prepare（校验 md5/sha1/md5_10m
+// 与 file_size）、预签名 PUT（回收分片）、upload_part_finish（校验分片 md5）、
+// /files 合并（校验 upload_id），最后比对分片重组内容与原始字节。
+func TestUploadFileChunked(t *testing.T) {
+	data := []byte("0123456789abcdefghijQRSTUVWXYZ") // 30 字节，切成 5+5+20 三片
+	var mu sync.Mutex
+	chunks := map[int][]byte{}
+	mergeDone := false
+
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/upload_prepare"):
+			var req struct {
+				FileType int    `json:"file_type"`
+				FileName string `json:"file_name"`
+				FileSize string `json:"file_size"`
+				MD5      string `json:"md5"`
+				SHA1     string `json:"sha1"`
+				MD510m   string `json:"md5_10m"`
+			}
+			if err := json.Unmarshal(body, &req); err != nil {
+				t.Errorf("prepare 请求体非 JSON: %v", err)
+			}
+			if req.FileType != 4 || req.FileName != "报表.bin" || req.FileSize != "30" {
+				t.Errorf("prepare 字段错: %+v", req)
+			}
+			md5Full := fmt.Sprintf("%x", md5.Sum(data))
+			sha1Full := fmt.Sprintf("%x", sha1.Sum(data))
+			if req.MD5 != md5Full || req.SHA1 != sha1Full || req.MD510m != md5Full { // <10MB 时 md5_10m == 全量 md5
+				t.Errorf("校验值错: got md5=%s sha1=%s md5_10m=%s", req.MD5, req.SHA1, req.MD510m)
+			}
+			fmt.Fprint(w, fmt.Sprintf(`{"upload_id":"UP1","block_size":"5","parts":[
+				{"index":0,"presigned_url":%q,"block_size":"5"},
+				{"index":1,"presigned_url":%q,"block_size":"5"},
+				{"index":2,"presigned_url":%q,"block_size":"20"}]}`,
+				srv.URL+"/chunk/0", srv.URL+"/chunk/1", srv.URL+"/chunk/2"))
+		case strings.HasPrefix(r.URL.Path, "/chunk/"):
+			idx, _ := strconv.Atoi(strings.TrimPrefix(r.URL.Path, "/chunk/"))
+			if r.Method != http.MethodPut {
+				t.Errorf("分片应 PUT, got %s", r.Method)
+			}
+			mu.Lock()
+			chunks[idx] = append([]byte(nil), body...)
+			mu.Unlock()
+		case strings.HasSuffix(r.URL.Path, "/upload_part_finish"):
+			var req struct {
+				UploadID  string `json:"upload_id"`
+				PartIndex int    `json:"part_index"`
+				BlockSize string `json:"block_size"`
+				MD5       string `json:"md5"`
+			}
+			_ = json.Unmarshal(body, &req)
+			if req.UploadID != "UP1" {
+				t.Errorf("part_finish upload_id=%q", req.UploadID)
+			}
+			mu.Lock()
+			part := chunks[req.PartIndex]
+			mu.Unlock()
+			if part == nil {
+				t.Errorf("part_finish 在 PUT 之前到达: index=%d", req.PartIndex)
+			}
+			if req.MD5 != fmt.Sprintf("%x", md5.Sum(part)) || req.BlockSize != strconv.Itoa(len(part)) {
+				t.Errorf("分片 %d 完成通知校验错: size=%s md5=%s", req.PartIndex, req.BlockSize, req.MD5)
+			}
+		case strings.HasSuffix(r.URL.Path, "/files"):
+			// 合并：upload_id 模式（无 url）
+			var req struct {
+				FileType int    `json:"file_type"`
+				URL      string `json:"url"`
+				UploadID string `json:"upload_id"`
+				FileName string `json:"file_name"`
+			}
+			_ = json.Unmarshal(body, &req)
+			if req.UploadID != "UP1" || req.URL != "" || req.FileType != 4 || req.FileName != "报表.bin" {
+				t.Errorf("合并请求字段错: %+v", req)
+			}
+			mergeDone = true
+			fmt.Fprint(w, `{"file_uuid":"FU","file_info":"CHUNKINFO","ttl":0}`)
+		default:
+			t.Errorf("意外请求: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+	old := qqAPIBase
+	qqAPIBase = srv.URL
+	defer func() { qqAPIBase = old }()
+
+	b := &Bot{tokenSource: &fakeTS{tok: "t"}, appID: "A"}
+	info, err := b.uploadFileChunked(context.Background(), true, "GID", 4, "报表.bin", data)
+	if err != nil {
+		t.Fatalf("uploadFileChunked: %v", err)
+	}
+	if info != "CHUNKINFO" {
+		t.Errorf("file_info=%q want CHUNKINFO", info)
+	}
+	if !mergeDone || len(chunks) != 3 {
+		t.Fatalf("分片流程不完整: merge=%v chunks=%v", mergeDone, chunks)
+	}
+	var reassembled []byte
+	for i := 0; i < len(chunks); i++ {
+		reassembled = append(reassembled, chunks[i]...)
+	}
+	if !bytes.Equal(reassembled, data) {
+		t.Errorf("分片重组不等于原文件: %q", reassembled)
+	}
+}
+
+// TestUploadFileChunkedServerError prepare 阶段 HTTP 错误应带状态码返回。
+func TestUploadFileChunkedServerError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		fmt.Fprint(w, `{"code":40093001,"message":"文件上传失败，请重试"}`)
+	}))
+	defer srv.Close()
+	old := qqAPIBase
+	qqAPIBase = srv.URL
+	defer func() { qqAPIBase = old }()
+
+	b := &Bot{tokenSource: &fakeTS{tok: "t"}, appID: "A"}
+	if _, err := b.uploadFileChunked(context.Background(), true, "G", 4, "a.bin", []byte("x")); err == nil ||
+		!strings.Contains(err.Error(), "upload_prepare") {
+		t.Fatalf("prepare 失败应报错: %v", err)
+	}
+}
+
+// TestFetchFile 代下载：内容一致、文件名取 URL 末段、无扩展名兜底 file.bin。
+func TestFetchFile(t *testing.T) {
+	src := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("APKBYTES"))
+	}))
+	defer src.Close()
+
+	data, name, err := fetchFile(context.Background(), src.URL+"/GoStudio-v1.0.12.apk?token=1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "APKBYTES" || name != "GoStudio-v1.0.12.apk" {
+		t.Errorf("fetchFile: name=%q data=%q", name, data)
+	}
+	if _, name, err := fetchFile(context.Background(), src.URL+"/"); err != nil || name != "file.bin" {
+		t.Errorf("无文件名应兜底 file.bin: %q %v", name, err)
 	}
 }
 

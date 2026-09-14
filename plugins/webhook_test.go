@@ -1,28 +1,263 @@
 package plugins
 
 import (
+	"bytes"
+	"encoding/json"
+	"errors"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
 	"qqbot/internal/bot"
+	"qqbot/internal/imgstore"
 )
 
-func TestExtractText(t *testing.T) {
-	cases := []struct{ in, want string }{
-		{`{"msg_type":"text","content":{"text":"飞书格式"}}`, "飞书格式"},
-		{`{"text":"简写格式"}`, "简写格式"},
-		{`纯文本 body`, "纯文本 body"},
-		{`{"msg_type":"image","content":{}}`, ""},
-		{`  `, ""},
-		{`{"msg_type":"text","content":{"text":"测试<at userid='all'>所有人</at>"}}`, "测试"},
-		{`{"text":"<at user_id=\"ou_123\">张三</at> 看下"}`, "@张三 看下"},
+func TestExtractPayload(t *testing.T) {
+	cases := []struct {
+		name    string
+		in      string
+		want    webhookPayload
+		wantErr string
+	}{
+		{name: "飞书格式", in: `{"msg_type":"text","content":{"text":"飞书格式"}}`,
+			want: webhookPayload{msgType: "text", text: "飞书格式"}},
+		{name: "简写格式", in: `{"text":"简写格式"}`,
+			want: webhookPayload{msgType: "text", text: "简写格式"}},
+		{name: "纯文本", in: `纯文本 body`,
+			want: webhookPayload{msgType: "text", text: "纯文本 body"}},
+		{name: "空 body", in: `  `, wantErr: "empty text"},
+		{name: "at 全体被删", in: `{"msg_type":"text","content":{"text":"测试<at userid='all'>所有人</at>"}}`,
+			want: webhookPayload{msgType: "text", text: "测试"}},
+		{name: "at 某人转文本", in: `{"text":"<at user_id=\"ou_123\">张三</at> 看下"}`,
+			want: webhookPayload{msgType: "text", text: "@张三 看下"}},
+		{name: "图片", in: `{"msg_type":"image","content":{"url":"https://x/a.png"}}`,
+			want: webhookPayload{msgType: "image", url: "https://x/a.png"}},
+		{name: "视频顶层 url", in: `{"msg_type":"video","url":"https://x/a.mp4"}`,
+			want: webhookPayload{msgType: "video", url: "https://x/a.mp4"}},
+		{name: "文件带说明文字", in: `{"msg_type":"file","content":{"url":"https://x/r.zip","text":"报表"}}`,
+			want: webhookPayload{msgType: "file", text: "报表", url: "https://x/r.zip"}},
+		{name: "markdown", in: `{"msg_type":"markdown","content":{"text":"# 标题\n**加粗**"}}`,
+			want: webhookPayload{msgType: "markdown", text: "# 标题\n**加粗**"}},
+		{name: "md 别名", in: `{"msg_type":"md","text":"- 列表"}`,
+			want: webhookPayload{msgType: "markdown", text: "- 列表"}},
+		{name: "markdown 空", in: `{"msg_type":"markdown","content":{}}`, wantErr: "empty text"},
+		{name: "富媒体缺 url", in: `{"msg_type":"image","content":{}}`,
+			wantErr: "需要 url"},
+		{name: "JSON 无文本无类型", in: `{"msg_type":"text","content":{}}`, wantErr: "empty text"},
+		{name: "不支持的类型", in: `{"msg_type":"post","content":{}}`,
+			wantErr: "不支持的 msg_type"},
 	}
 	for _, c := range cases {
-		if got := extractText([]byte(c.in)); got != c.want {
-			t.Errorf("extractText(%q) = %q, want %q", c.in, got, c.want)
+		got, err := extractPayload([]byte(c.in))
+		if c.wantErr != "" {
+			if err == nil || !strings.Contains(err.Error(), c.wantErr) {
+				t.Errorf("%s: extractPayload(%q) 错误 = %v, 应含 %q", c.name, c.in, err, c.wantErr)
+			}
+			continue
 		}
+		if err != nil || !reflect.DeepEqual(got, c.want) {
+			t.Errorf("%s: extractPayload(%q) = %+v, %v; want %+v", c.name, c.in, got, err, c.want)
+		}
+	}
+}
+
+func TestMediaKindByExt(t *testing.T) {
+	cases := map[string]string{
+		"png": "image", "JPG": "image", "jpeg": "image",
+		"mp4": "video", "mov": "video",
+		"silk": "voice", "mp3": "voice", "wav": "voice",
+		"zip": "file", "pdf": "file", "": "file",
+	}
+	for ext, want := range cases {
+		if got := mediaKindByExt(strings.ToLower(ext)); got != want {
+			t.Errorf("mediaKindByExt(%q) = %q, want %q", ext, got, want)
+		}
+	}
+}
+
+func TestURLExtOf(t *testing.T) {
+	if got := urlExtOf("https://x.com/a/b.PNG?sig=1"); got != "png" {
+		t.Errorf("urlExtOf 带查询参数 = %q, want png", got)
+	}
+	if got := urlExtOf("https://x.com/noext"); got != "" {
+		t.Errorf("urlExtOf 无扩展 = %q, want 空", got)
+	}
+}
+
+// multipartReq 构造一个 multipart/form-data 请求（fields 里 k=v；fileField 非空时
+// 追加一个文件字段）。
+func multipartReq(t *testing.T, fields map[string]string, fileField, filename string, content []byte) *http.Request {
+	t.Helper()
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	for k, v := range fields {
+		if err := mw.WriteField(k, v); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if fileField != "" {
+		fw, err := mw.CreateFormFile(fileField, filename)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := fw.Write(content); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := mw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/webhook/g/s", &buf)
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	return req
+}
+
+func TestParseMultipart(t *testing.T) {
+	dir := t.TempDir()
+	host := &imgstore.Host{BaseURL: "https://img.example.com", Dir: dir}
+	p := NewWebhook(t.TempDir()+"/webhook.json", "", "", host)
+
+	// png 直传（有图床）：嗅探为 image，字节落盘图床目录换成公网 URL
+	pl, err := p.parseMultipart(httptest.NewRecorder(), multipartReq(t, map[string]string{"text": "看图"}, "file", "a.png", []byte("pngdata")))
+	if err != nil {
+		t.Fatalf("png 直传: %v", err)
+	}
+	if pl.msgType != "image" || pl.text != "看图" || !strings.HasPrefix(pl.url, host.BaseURL+"/") || pl.fileData != nil {
+		t.Errorf("png 直传 payload = %+v", pl)
+	}
+	if ents, _ := os.ReadDir(dir); len(ents) != 1 || !strings.HasSuffix(ents[0].Name(), ".png") {
+		t.Errorf("图床目录应落盘 1 个 .png: %v", ents)
+	}
+
+	// 未知扩展：按通用文件，字节直传分片（不落图床）
+	pl, err = p.parseMultipart(httptest.NewRecorder(), multipartReq(t, nil, "file", "报表.xlsx", []byte("XLSX")))
+	if err != nil || pl.msgType != "file" || pl.fileData == nil || string(pl.fileData) != "XLSX" || pl.fileName != "报表.xlsx" || pl.url != "" {
+		t.Errorf("xlsx 应字节直传: %+v, %v", pl, err)
+	}
+	if ents, _ := os.ReadDir(dir); len(ents) != 1 {
+		t.Errorf("file 直传不应落图床: %v", ents)
+	}
+
+	// 显式 type=file 覆盖嗅探：同样字节直传
+	pl, err = p.parseMultipart(httptest.NewRecorder(), multipartReq(t, map[string]string{"type": "file"}, "file", "a.png", []byte("x")))
+	if err != nil || pl.msgType != "file" || pl.fileData == nil {
+		t.Errorf("显式 file 应覆盖嗅探: %+v, %v", pl, err)
+	}
+
+	// url 字段模式（multipart 里直接给地址，不落图床）；缺省按扩展嗅探
+	pl, err = p.parseMultipart(httptest.NewRecorder(), multipartReq(t, map[string]string{"url": "https://x/a.mp4"}, "", "", nil))
+	if err != nil || pl.msgType != "video" || pl.url != "https://x/a.mp4" {
+		t.Errorf("url 字段模式: %+v, %v", pl, err)
+	}
+
+	// 既无 file 也无 url
+	if _, err = p.parseMultipart(httptest.NewRecorder(), multipartReq(t, nil, "", "", nil)); err == nil || !strings.Contains(err.Error(), "file") {
+		t.Errorf("缺 file/url 应报错: %v", err)
+	}
+
+	// 不支持的 type
+	if _, err = p.parseMultipart(httptest.NewRecorder(), multipartReq(t, map[string]string{"type": "audio"}, "file", "a.png", []byte("x"))); err == nil || !strings.Contains(err.Error(), "不支持的 type") {
+		t.Errorf("未知 type 应报错: %v", err)
+	}
+
+	// 未配图床：image 兜底字节直传（不再 503）
+	p2 := NewWebhook(t.TempDir()+"/webhook.json", "", "", nil)
+	pl, err = p2.parseMultipart(httptest.NewRecorder(), multipartReq(t, nil, "file", "a.png", []byte("px")))
+	if err != nil || pl.msgType != "image" || pl.fileData == nil || string(pl.fileData) != "px" {
+		t.Errorf("无图床 image 应兜底直传: %+v, %v", pl, err)
+	}
+
+	// 未配图床：voice 无转码能力，仍 503
+	_, err = p2.parseMultipart(httptest.NewRecorder(), multipartReq(t, nil, "file", "a.mp3", []byte("x")))
+	var se *statusErr
+	if err == nil || !errors.As(err, &se) || se.status != http.StatusServiceUnavailable {
+		t.Errorf("无图床语音应 503: %v", err)
+	}
+
+	// 超过大小上限：413
+	old := webhookMaxFileBytes
+	webhookMaxFileBytes = 8
+	defer func() { webhookMaxFileBytes = old }()
+	_, err = p.parseMultipart(httptest.NewRecorder(), multipartReq(t, nil, "file", "big.png", []byte("123456789")))
+	if err == nil || !errors.As(err, &se) || se.status != http.StatusRequestEntityTooLarge {
+		t.Errorf("超限应 413: %v", err)
+	}
+}
+
+// TestWebhookHandle 富媒体推送全链路：JSON url 模式与 multipart 直传都应走到
+// 「发送到 QQ」这一步（未连接 api → ErrNotConnected → 502），图床落盘可验证。
+func TestWebhookHandle(t *testing.T) {
+	b := bot.New(bot.Config{})
+	dir := t.TempDir()
+	p := NewWebhook(t.TempDir()+"/webhook.json", "", "",
+		&imgstore.Host{BaseURL: "https://img.example.com", Dir: dir})
+	p.Install(b)
+	p.mu.Lock()
+	p.conf.Groups["g1"] = "s1"
+	p.mu.Unlock()
+	srv := httptest.NewServer(http.HandlerFunc(p.handle))
+	defer srv.Close()
+
+	post := func(contentType, body string) *http.Response {
+		t.Helper()
+		resp, err := http.Post(srv.URL+"/webhook/g1/s1", contentType, strings.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		return resp
+	}
+
+	// JSON 富媒体（file 类型）：路由到发送步，因未连接 api 而 502
+	if resp := post("application/json", `{"msg_type":"file","content":{"url":"https://x/r.zip","text":"报表"}}`); resp.StatusCode != http.StatusBadGateway {
+		t.Errorf("JSON file 推送应 502（发送失败）, got %d", resp.StatusCode)
+	}
+	// JSON markdown：路由到 SendGroupMarkdown（未连接 api → 502，证明走 md 分支）
+	if resp := post("application/json", `{"msg_type":"markdown","content":{"text":"# hi **md**"}}`); resp.StatusCode != http.StatusBadGateway {
+		t.Errorf("JSON markdown 推送应 502（发送失败）, got %d", resp.StatusCode)
+	}
+	// 纯文本行为不变
+	if resp := post("text/plain", "hello"); resp.StatusCode != http.StatusBadGateway {
+		t.Errorf("纯文本推送应 502（发送失败）, got %d", resp.StatusCode)
+	}
+	// 错误负载：400
+	if resp := post("application/json", `{"msg_type":"image","content":{}}`); resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("缺 url 应 400, got %d", resp.StatusCode)
+	}
+
+	// multipart 直传：图床落盘后同样走到发送步（502）
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	fw, _ := mw.CreateFormFile("file", "a.png")
+	_, _ = fw.Write([]byte("png"))
+	_ = mw.Close()
+	resp, err := http.Post(srv.URL+"/webhook/g1/s1", mw.FormDataContentType(), &buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Errorf("multipart 推送应 502（发送失败）, got %d", resp.StatusCode)
+	}
+	if ents, _ := os.ReadDir(dir); len(ents) != 1 {
+		t.Errorf("multipart 应落盘图床 1 个文件: %v", ents)
+	}
+
+	// 错误 sign → 403；GET → 405
+	resp2, _ := http.Post(srv.URL+"/webhook/g1/wrong", "text/plain", strings.NewReader("x"))
+	resp2.Body.Close()
+	if resp2.StatusCode != http.StatusForbidden {
+		t.Errorf("错误 sign 应 403, got %d", resp2.StatusCode)
+	}
+	get, _ := http.Get(srv.URL + "/webhook/g1/s1")
+	get.Body.Close()
+	if get.StatusCode != http.StatusMethodNotAllowed {
+		t.Errorf("GET 应 405, got %d", get.StatusCode)
 	}
 }
 
@@ -51,7 +286,7 @@ func TestAllowedIP(t *testing.T) {
 // 与自动菜单/面板里都看不到它（命令本体在 internal/bot 的 owner 测试里覆盖）。
 func TestWebhookInstallOwnerOnly(t *testing.T) {
 	b := bot.New(bot.Config{}, bot.WithPrefixes("/"), bot.WithOwners("boss"))
-	NewWebhook(t.TempDir()+"/webhook.json", "", "").Install(b)
+	NewWebhook(t.TempDir()+"/webhook.json", "", "", nil).Install(b)
 
 	stranger := bot.NewEventCtx(b, "c2c", "help", "u9", "", "", "m", "", false)
 	if help := b.HelpFor(stranger); strings.Contains(help, "webhook") || strings.Contains(help, "推送地址") {
@@ -73,7 +308,7 @@ func TestWebhookInstallOwnerOnly(t *testing.T) {
 // 回复与私聊发送在测试里因未连接 api 而是 no-op，这里只验证状态侧。
 func TestWebhookGenRouting(t *testing.T) {
 	b := bot.New(bot.Config{}, bot.WithPrefixes("/"))
-	p := NewWebhook(t.TempDir()+"/webhook.json", "", "")
+	p := NewWebhook(t.TempDir()+"/webhook.json", "", "", nil)
 	p.Install(b)
 
 	run := func(source, groupID, userID string, args ...string) {
@@ -146,5 +381,40 @@ func TestWebhookGenRouting(t *testing.T) {
 	}
 	if last != "" {
 		t.Errorf("off g2 后 lastGroup[u1] 应清空, got %q", last)
+	}
+}
+
+// TestWebhookConfSaveRoundTrip 落盘字段（groups/whitelist）不因新增 imgHost 而变。
+func TestWebhookConfSaveRoundTrip(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "webhook.json")
+	p := NewWebhook(file, "", "", nil)
+	p.conf = webhookConf{Groups: map[string]string{}} // 正常经 Install→load 初始化，这里直连
+	p.mu.Lock()
+	p.conf.Groups["g"] = "s"
+	p.conf.Whitelist = []string{"1.2.3.4"}
+	p.save()
+	p.mu.Unlock()
+
+	data, err := os.ReadFile(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var c webhookConf
+	if err := json.Unmarshal(data, &c); err != nil {
+		t.Fatal(err)
+	}
+	if c.Groups["g"] != "s" || len(c.Whitelist) != 1 {
+		t.Errorf("落盘内容异常: %s", data)
+	}
+
+	p2 := NewWebhook(file, "", "", nil)
+	if err := p2.load(); err != nil {
+		t.Fatal(err)
+	}
+	p2.mu.Lock()
+	ok := p2.conf.Groups["g"] == "s"
+	p2.mu.Unlock()
+	if !ok {
+		t.Error("重载后应恢复 groups")
 	}
 }

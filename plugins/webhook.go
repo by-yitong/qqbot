@@ -11,7 +11,9 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -20,6 +22,7 @@ import (
 	"github.com/tidwall/gjson"
 
 	"qqbot/internal/bot"
+	"qqbot/internal/imgstore"
 	"qqbot/internal/utils"
 )
 
@@ -32,15 +35,27 @@ import (
 //	私聊 /webhook [群id] → 同上。缺省用该主人最近在群里触发过的群（内存记忆，重启即失）。
 //	/webhook off [群id]  → 作废地址（群里触发/私聊带参/私聊用记忆，同上）。
 //	/webhook white add|del|list <ip> → 管理来源 IP 白名单
-//	POST {base}/webhook/{group_id}/{sign}  → 推送（兼容飞书自定义机器人 JSON 格式）
+//	POST {base}/webhook/{group_id}/{sign}  → 推送，三种 body：
+//	  1. 文本/Markdown：飞书机器人 JSON {"msg_type":"text|markdown","content":{"text":"..."}}
+//	     / {"text":"..."} / 纯文本；markdown 走原生 md（群内受官方语料校验/审核），
+//	     ?title=xx 让文本加粗标题（text 类型也会因此切成 markdown 发送）
+//	  2. 富媒体 URL：{"msg_type":"image|video|voice|file","content":{"url":"https://..."}}，
+//	     url 须公网可达（QQ 是 URL 模式自行下载，大小受官方限制：图 20M/视频 30M/
+//	     语音 20M 软限）；file 例外——官方对通用文件不拉 URL，服务端代下载（200MB
+//	     上限）后分片直传；同 body 可带 content.text，文字与文件各发一条
+//	  3. multipart/form-data 直传文件：file 字段 + 可选 type(image/video/voice/file)、
+//	     text。file 走官方分片上传直推腾讯（不经图床）；image/video 经图床走 URL
+//	     模式（图床未配置时兜底分片直传）；语音必须经图床（mp3/wav 转 silk）
+//	?title=xx 参数让文本部分走 markdown（加粗标题）。
 //
 // 命令仅主人可用（.OwnerOnly，BOT_OWNERS 配置）——生成地址等于放开外部向群里
 // 注入消息的入口，不能交给任意群成员。白名单为空时允许所有来源（内部用图省事；
 // 要收紧就配 white）。群主动消息需在 q.qq.com 开通权限，受官方频控/额度限制。
 type Webhook struct {
-	file       string // 落盘路径（data/webhook.json）
-	listenAddr string // HTTP 监听地址，空则不启服务
-	baseURL    string // 生成地址时的公网前缀；空则用请求 Host
+	file       string         // 落盘路径（data/webhook.json）
+	listenAddr string         // HTTP 监听地址，空则不启服务
+	baseURL    string         // 生成地址时的公网前缀；空则用请求 Host
+	imgHost    *imgstore.Host // multipart 直传文件 → 公网 URL（未配置则该模式不可用）
 
 	bot       *bot.Bot
 	mu        sync.Mutex
@@ -55,14 +70,15 @@ type webhookConf struct {
 	Whitelist []string          `json:"whitelist"` // 来源 IP 白名单
 }
 
-// NewWebhook 创建插件。file 是配置落盘路径；listenAddr 空 = 不启 HTTP 服务（只留命令）。
-func NewWebhook(file, listenAddr, baseURL string) *Webhook {
-	return &Webhook{file: file, listenAddr: listenAddr, baseURL: baseURL, lastGroup: map[string]string{}}
+// NewWebhook 创建插件。file 是配置落盘路径；listenAddr 空 = 不启 HTTP 服务（只留命令）；
+// imgHost 用于 multipart 直传文件发布公网 URL（nil = 直传不可用，JSON url 模式不受影响）。
+func NewWebhook(file, listenAddr, baseURL string, imgHost *imgstore.Host) *Webhook {
+	return &Webhook{file: file, listenAddr: listenAddr, baseURL: baseURL, imgHost: imgHost, lastGroup: map[string]string{}}
 }
 
 // NewWebhookFromEnv 读 WEBHOOK_LISTEN 等变量构造；未配监听地址返回 nil（不注册）。
 // /webhook 仅主人可用（BOT_OWNERS）；没配主人 = 命令谁都用不了，这里提醒一句。
-func NewWebhookFromEnv() bot.Plugin {
+func NewWebhookFromEnv(imgHost *imgstore.Host) bot.Plugin {
 	addr := utils.EnvOr("WEBHOOK_LISTEN", "")
 	if addr == "" {
 		return nil
@@ -71,7 +87,7 @@ func NewWebhookFromEnv() bot.Plugin {
 	if len(utils.SplitList(os.Getenv("BOT_OWNERS"))) == 0 {
 		log.Println("[webhook] ⚠️ 未配置 BOT_OWNERS：/webhook 命令将对所有人拒绝（用 /id 查 openid 后配置）")
 	}
-	return NewWebhook(utils.EnvOr("WEBHOOK_FILE", "./data/webhook.json"), addr, utils.EnvOr("WEBHOOK_BASE_URL", ""))
+	return NewWebhook(utils.EnvOr("WEBHOOK_FILE", "./data/webhook.json"), addr, utils.EnvOr("WEBHOOK_BASE_URL", ""), imgHost)
 }
 
 // Install 加载配置、注册命令与 HTTP 服务。
@@ -193,7 +209,8 @@ func (p *Webhook) cmdGen(c *bot.Ctx, explicitGroup string) {
 	}
 	url := p.newGroupURL(c.UserID(), groupID)
 	dm := "群 " + groupID + " 的推送地址（旧地址即刻作废）：\n" + url +
-		"\nPOST 调用，body 为飞书机器人格式 {\"msg_type\":\"text\",\"content\":{\"text\":\"...\"}}，或纯文本"
+		"\nPOST 调用：文本/Markdown 用 {\"msg_type\":\"text|markdown\",\"content\":{\"text\":\"...\"}} 或纯文本；" +
+		"发文件用 {\"msg_type\":\"image|video|voice|file\",\"content\":{\"url\":\"https://...\"}}，或 multipart 直传（file 字段）"
 
 	if !c.IsGroup() {
 		c.ReplyText(dm)
@@ -344,26 +361,14 @@ func (p *Webhook) handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	body, err := io.ReadAll(io.LimitReader(r.Body, 64<<10))
+	pl, err := p.parseBody(w, r)
 	if err != nil {
-		http.Error(w, "read body: "+err.Error(), http.StatusBadRequest)
+		writeErr(w, err)
 		return
 	}
-	text := extractText(body)
-	if text == "" {
-		http.Error(w, "empty text", http.StatusBadRequest)
-		return
-	}
-	// 可选 ?title=xx：带了就走 markdown（加粗标题 + 内容原样拼接，内容本身是 md，
-	// 不能再包 ```，否则渲染成一坨代码块），不带发纯文本。
-	// title 只是展示参数，不参与路径/sign 校验。
-	if title := strings.TrimSpace(r.URL.Query().Get("title")); title != "" {
-		md := fmt.Sprintf("**%s**\n\n%s", title, text)
-		_, err = p.bot.SendGroupMarkdown(r.Context(), groupID, "", md)
-	} else {
-		_, err = p.bot.SendGroupText(r.Context(), groupID, "", text)
-	}
-	if err != nil {
+	// 可选 ?title=xx：带了文本部分就走 markdown（加粗标题 + 内容原样拼接，内容本身
+	// 是 md，不能再包 ```，否则渲染成一坨代码块）。title 只是展示参数，不参与路径/sign 校验。
+	if err := p.deliver(r.Context(), groupID, pl, strings.TrimSpace(r.URL.Query().Get("title"))); err != nil {
 		log.Printf("[webhook] 发送到群 %s 失败: %v", groupID, err)
 		http.Error(w, "send: "+err.Error(), http.StatusBadGateway)
 		return
@@ -372,6 +377,246 @@ func (p *Webhook) handle(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte(`{"StatusCode":0,"StatusMessage":"success","code":0,"data":{},"msg":"success"}`))
+}
+
+// --- 请求负载解析 ---
+
+// webhookPayload 一次推送要发的内容：text 与 url/fileData 可各自为空、也可同发
+// （先文字后文件）。msgType 是富媒体类型（image/video/voice/file）；直传字节时
+// 走 fileData+fileName（file 一律分片直传，图床未配置时 image/video 也兜底）。
+type webhookPayload struct {
+	msgType  string
+	text     string
+	url      string
+	fileData []byte // multipart 直传的原始字节（分片直传用，不经图床）
+	fileName string // multipart 直传的原始文件名
+}
+
+// statusErr 带建议 HTTP 状态码的错误（图床/下载侧故障用 5xx）；普通 error 默认 400。
+type statusErr struct {
+	status int
+	msg    string
+}
+
+func (e *statusErr) Error() string { return e.msg }
+
+// writeErr 按错误里的状态码回错误，缺省 400（客户端问题）。
+func writeErr(w http.ResponseWriter, err error) {
+	status := http.StatusBadRequest
+	var se *statusErr
+	if errors.As(err, &se) {
+		status = se.status
+	}
+	http.Error(w, err.Error(), status)
+}
+
+// parseBody 按 Content-Type 分流：multipart 直传文件走图床发布公网 URL，
+// 其余按 JSON/纯文本解析（富媒体只收公网 url，由 QQ 自行下载）。
+func (p *Webhook) parseBody(w http.ResponseWriter, r *http.Request) (webhookPayload, error) {
+	if strings.HasPrefix(r.Header.Get("Content-Type"), "multipart/form-data") {
+		return p.parseMultipart(w, r)
+	}
+	body, err := io.ReadAll(io.LimitReader(r.Body, 64<<10))
+	if err != nil {
+		return webhookPayload{}, fmt.Errorf("read body: %w", err)
+	}
+	return extractPayload(body)
+}
+
+// extractPayload 从 JSON/纯文本 body 解析推送内容：飞书机器人 JSON
+// （content.text / text 字段）、任意 JSON 的 text 字段，或纯文本 body；
+// msg_type=image/video/voice/file 时取 content.url / url 发富媒体（可同时带
+// content.text 说明文字）。
+func extractPayload(body []byte) (webhookPayload, error) {
+	s := strings.TrimSpace(string(body))
+	if s == "" {
+		return webhookPayload{}, errors.New("empty text")
+	}
+	if s[0] != '{' {
+		return webhookPayload{msgType: "text", text: stripLarkTags(s)}, nil
+	}
+	text := ""
+	for _, key := range []string{"content.text", "text"} {
+		if v := gjson.Get(s, key); v.Exists() {
+			text = strings.TrimSpace(stripLarkTags(v.String()))
+			break
+		}
+	}
+	rawURL := ""
+	for _, key := range []string{"content.url", "url"} {
+		if v := gjson.Get(s, key); v.Exists() {
+			rawURL = strings.TrimSpace(v.String())
+			break
+		}
+	}
+	switch msgType := strings.ToLower(strings.TrimSpace(gjson.Get(s, "msg_type").String())); msgType {
+	case "", "text":
+		if text == "" {
+			return webhookPayload{}, errors.New("empty text")
+		}
+		return webhookPayload{msgType: "text", text: text}, nil
+	case "markdown", "md":
+		// 原生 markdown 群内走语料校验/异步审核，发不出或延迟属官方限制。
+		// markdown 只发文本，url 字段忽略（富媒体请用 image/video/voice/file）。
+		if text == "" {
+			return webhookPayload{}, errors.New("empty text")
+		}
+		return webhookPayload{msgType: "markdown", text: text}, nil
+	case "image", "video", "voice", "file":
+		if rawURL == "" {
+			return webhookPayload{}, fmt.Errorf("msg_type=%s 需要 url（content.url 或 url 字段）", msgType)
+		}
+		return webhookPayload{msgType: msgType, text: text, url: rawURL}, nil
+	default:
+		return webhookPayload{}, fmt.Errorf("不支持的 msg_type: %s（支持 text/markdown/image/video/voice/file）", msgType)
+	}
+}
+
+// webhookMaxFileBytes multipart 直传的大小上限（官方 file_type 硬限 200MB）。
+// 用 var 便于测试覆盖。
+var webhookMaxFileBytes int64 = 200 << 20
+
+// parseMultipart 解析 multipart/form-data：file 字段是文件字节（经图床发布公网
+// URL——QQ 是 URL 模式下载，直传也绕不开图床），或用 url 字段直接给公网地址；
+// 可选 type(image/video/voice/file，缺省按扩展名识别、认不出按通用文件)、
+// text（说明文字，先于文件发送）。
+func (p *Webhook) parseMultipart(w http.ResponseWriter, r *http.Request) (webhookPayload, error) {
+	r.Body = http.MaxBytesReader(w, r.Body, webhookMaxFileBytes)
+	if err := r.ParseMultipartForm(16 << 20); err != nil {
+		var mbe *http.MaxBytesError
+		if errors.As(err, &mbe) {
+			return webhookPayload{}, &statusErr{status: http.StatusRequestEntityTooLarge,
+				msg: fmt.Sprintf("文件超过大小上限 %d MB", webhookMaxFileBytes>>20)}
+		}
+		return webhookPayload{}, fmt.Errorf("解析 multipart 失败: %w", err)
+	}
+	text := stripLarkTags(strings.TrimSpace(r.FormValue("text")))
+	msgType := strings.ToLower(strings.TrimSpace(r.FormValue("type")))
+	if msgType == "" {
+		msgType = strings.ToLower(strings.TrimSpace(r.FormValue("msg_type")))
+	}
+
+	ext := ""
+	var fileData []byte
+	fileName := ""
+	rawURL := strings.TrimSpace(r.FormValue("url"))
+	if rawURL == "" {
+		file, fh, err := r.FormFile("file")
+		if err != nil {
+			return webhookPayload{}, errors.New("multipart 需要 file（文件）或 url（公网地址）字段")
+		}
+		defer file.Close()
+		data, err := io.ReadAll(file)
+		if err != nil {
+			return webhookPayload{}, fmt.Errorf("读文件失败: %w", err)
+		}
+		ext = strings.ToLower(strings.TrimPrefix(filepath.Ext(fh.Filename), "."))
+		fileData, fileName = data, fh.Filename
+	} else {
+		ext = urlExtOf(rawURL)
+	}
+	if msgType == "" {
+		msgType = mediaKindByExt(ext)
+	}
+	switch msgType {
+	case "image", "video", "voice", "file":
+	default:
+		return webhookPayload{}, fmt.Errorf("不支持的 type: %s（支持 image/video/voice/file）", msgType)
+	}
+	// 分发：file 一律分片直传（官方对通用文件不拉 URL，字节直推腾讯）；
+	// image/video 优先经图床走 URL 模式（图床未配置时兜底分片直传）；
+	// 语音必须经图床（mp3/wav 要转 silk，分片直传改不了格式）。
+	if fileData != nil {
+		if msgType == "file" || !p.imgHost.Configured() {
+			if msgType == "voice" {
+				return webhookPayload{}, &statusErr{status: http.StatusServiceUnavailable,
+					msg: "语音直传需要图床转码（IMGHOST_BASE_URL 未配置）"}
+			}
+			return webhookPayload{msgType: msgType, text: text, fileData: fileData, fileName: fileName}, nil
+		}
+		pub, err := p.imgHost.Upload(r.Context(), fileData, ext)
+		if err != nil {
+			return webhookPayload{}, &statusErr{status: http.StatusBadGateway, msg: "上传图床失败: " + err.Error()}
+		}
+		return webhookPayload{msgType: msgType, text: text, url: pub, fileName: fileName}, nil
+	}
+	return webhookPayload{msgType: msgType, text: text, url: rawURL, fileName: fileName}, nil
+}
+
+// extMediaKinds 扩展名 → 富媒体类型。官方图片只认 png/jpg、视频 mp4、语音 silk
+// （mp3/wav 走自动转码）；不在表里的扩展名按通用文件（file_type=4）发，无格式要求。
+var extMediaKinds = map[string]string{
+	"png": "image", "jpg": "image", "jpeg": "image",
+	"mp4": "video", "m4v": "video", "mov": "video",
+	"silk": "voice", "mp3": "voice", "wav": "voice",
+}
+
+// mediaKindByExt 按扩展名猜富媒体类型，认不出按通用文件。
+func mediaKindByExt(ext string) string {
+	if k, ok := extMediaKinds[ext]; ok {
+		return k
+	}
+	return "file"
+}
+
+// urlExtOf 取 URL 路径的扩展名（去点转小写；无扩展返回空）。
+func urlExtOf(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return ""
+	}
+	return strings.ToLower(strings.TrimPrefix(path.Ext(u.Path), "."))
+}
+
+// deliver 把负载发进群：文本部分先发（msg_type=markdown 或 ?title= 走原生
+// markdown，其余纯文本；两者同在时 title 作加粗标题拼在最前），富媒体随后一条。
+// 主动消息（msgAnchor 空）需 q.qq.com 开通权限，受官方频控/额度限制。
+func (p *Webhook) deliver(ctx context.Context, groupID string, pl webhookPayload, title string) error {
+	if pl.text != "" {
+		var err error
+		if pl.msgType == "markdown" || title != "" {
+			md := pl.text
+			if title != "" {
+				md = fmt.Sprintf("**%s**\n\n%s", title, md)
+			}
+			_, err = p.bot.SendGroupMarkdown(ctx, groupID, "", md)
+		} else {
+			_, err = p.bot.SendGroupText(ctx, groupID, "", pl.text)
+		}
+		if err != nil {
+			return err
+		}
+	}
+	// 直传字节：file 分片直传；image/video 图床缺配时兜底分片。
+	if pl.fileData != nil {
+		var err error
+		switch pl.msgType {
+		case "image":
+			_, err = p.bot.SendGroupMediaBytes(ctx, groupID, "", 1, pl.fileName, pl.fileData)
+		case "video":
+			_, err = p.bot.SendGroupMediaBytes(ctx, groupID, "", 2, pl.fileName, pl.fileData)
+		default: // file
+			_, err = p.bot.SendGroupFileBytes(ctx, groupID, "", pl.fileName, pl.fileData)
+		}
+		return err
+	}
+	if pl.url == "" {
+		return nil
+	}
+	switch pl.msgType {
+	case "image":
+		_, err := p.bot.SendGroupImage(ctx, groupID, "", pl.url)
+		return err
+	case "video":
+		_, err := p.bot.SendGroupVideo(ctx, groupID, "", pl.url)
+		return err
+	case "voice":
+		_, err := p.bot.SendGroupVoice(ctx, groupID, "", pl.url)
+		return err
+	default: // file：官方不拉 URL，服务端代下载后分片直传
+		_, err := p.bot.SendGroupFile(ctx, groupID, "", pl.url)
+		return err
+	}
 }
 
 // allowedIP 校验来源 IP：白名单支持单 IP 与 CIDR；为空放行。
@@ -414,24 +659,6 @@ func clientIP(r *http.Request) string {
 		return r.RemoteAddr
 	}
 	return host
-}
-
-// extractText 从 body 提取要发的文本：飞书机器人 JSON（content.text / text 字段）、
-// 任意 JSON 的 text 字段，或纯文本 body。
-func extractText(body []byte) string {
-	s := strings.TrimSpace(string(body))
-	if s == "" {
-		return ""
-	}
-	if s[0] == '{' {
-		for _, key := range []string{"content.text", "text"} {
-			if v := gjson.Get(s, key); v.Exists() {
-				return strings.TrimSpace(stripLarkTags(v.String()))
-			}
-		}
-		return ""
-	}
-	return stripLarkTags(s)
 }
 
 // larkAtRE 匹配飞书富文本 @ 标签：<at userid='xxx'>名字</at>（引号/有无下划线都兼容）。

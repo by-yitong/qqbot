@@ -6,7 +6,7 @@
 - **WSS 出站**：机器人主动连接腾讯（内网/NAT 友好，无需公网 HTTPS）。
 - **插件框架** `internal/bot`：写功能只关心业务，handler 收一个 `*bot.Ctx`。
 - **agent harness** `internal/agent`：未命中命令的消息交给一个可调工具、有记忆、能压缩上下文的 agent（设计参考 [pi](https://github.com/earendil-works/pi) 的 coding-agent）。
-- 内置插件：`ping`（在线检测 / 真实 ping）/ `whois` / `echo` / `counter`（会话状态）/ `happy`（每日笑话）/ `agent`（AI 兜底）/ `video`（抖音/快手短视频解析）/ `panel`（宝塔面板状态）/ 入群欢迎 / 入群审批 / 禁言 / 成员管理与黑名单 等更多。
+- 内置插件：`ping`（在线检测 / 真实 ping）/ `whois` / `echo` / `counter`（会话状态）/ `happy`（每日笑话）/ `agent`（AI 兜底）/ `video`（抖音/快手短视频解析）/ `music`（多音源点歌：5sing / QQ / 酷我 / 酷我高音质 / 汽水 / 网易，按钮选歌）/ `panel`（宝塔面板状态）/ 入群欢迎 / 入群审批 / 禁言 / 成员管理与黑名单 等更多。
 
 > ⚠️ 官方机器人约束：**只能被动回复**（收到消息后 5 分钟内回复）、**用户/群 ID 是 openid（不是 QQ 号）**。主动推送（上线通知、入群欢迎、定时任务等）需在 q.qq.com 开通**主动消息**权限。群管接口官方正在逐步开放：2026-08 起新增**群成员入群事件、入群申请事件与审批、禁言接口**，2026-09 新增**成员列表/详情、批量移除（踢人）与群黑名单接口**（内邀白名单机制，未接入的机器人报 11253），见 [群管功能](docs/group.md)。
 >
@@ -20,6 +20,7 @@
 | [docs/agent.md](docs/agent.md) | Agent harness：工具循环 / 记忆（短期+长期）/ 压缩 / 技能 / MCP / 图床部署 / 内置工具 / 关键 env |
 | [docs/scheduler.md](docs/scheduler.md) | 定时任务：对话里让 AI 建任务 / 插件声明任务 |
 | [docs/group.md](docs/group.md) | 群管功能：入群欢迎 / 入群申请自动审批（AI 判答案）/ 群成员禁言 / 成员管理与黑名单 |
+| [docs/music.md](docs/music.md) | 点歌：6 音源（itapi）/ 按钮选歌 / 语音与文件发送 / 音源切换 |
 
 ## 安装与运行
 
@@ -68,3 +69,4 @@ gofmt -l .
 - WSS（出站）目前可用、内网友好；若腾讯日后弃用 WSS，需切 Webhook（要公网 HTTPS）。
 - ID 是 openid（每个应用不同），无法从 QQ 号推导；因此没有「按 QQ 号设超管」。
 - 富媒体：bot 支持**发图**（`send_image` 工具 / `ReplyImage`，群+私聊，走富媒体上传 MsgType=7）与**收图**（附件 URL 传入 agent）；原生 Markdown 群内受限（公域校验语料/异步审核，可能发不出或延迟）。频道发图 v1 不支持。
+- Webhook 推送：POST `/webhook/{group}/{sign}` 支持文本 / Markdown（`{"msg_type":"markdown","content":{"text":"..."}}`，原生 md，群内受官方语料校验/审核）/ 图片/视频/语音/通用文件——JSON `{"msg_type":"image|video|voice|file","content":{"url":"..."}}` 或 multipart 直传（`file` 字段）。图片/视频走 URL 模式（QQ 自行下载）；**通用文件官方不拉 URL**，服务端代下载（≤200MB）后走官方分片上传直推（multipart 字节直接分片，不经图床）。软限：图 20M / 视频 30M / 语音 20M / 文件 200M；经域名上传另受 nginx `client_max_body_size`（当前 50m）限制。

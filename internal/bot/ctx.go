@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/tencent-connect/botgo/dto"
 	"github.com/tencent-connect/botgo/dto/keyboard"
@@ -187,6 +188,13 @@ func (c *Ctx) ReplyMarkdown(md string) (string, error) {
 // 结构为 {"content": {"rows": [...], "style": {...}}}（见 botgo keyboard 包）。
 // 按钮消息需以 markdown 消息发送，content 会被置为一个空格占位。
 func (c *Ctx) ReplyRowJson(rawJSON string) (string, error) {
+	return c.ReplyMarkdownKeyboard(" ", rawJSON)
+}
+
+// ReplyMarkdownKeyboard 以「markdown 内容 + 底部按钮」合成一条消息回复：
+// md 为消息正文（markdown，支持 ![图片](公网URL) 语法，QQ 会转存该图），
+// rawJSON 为按钮组件原始 JSON（结构同 ReplyRowJson）。列表 + 选歌按钮一条发完。
+func (c *Ctx) ReplyMarkdownKeyboard(md, rawJSON string) (string, error) {
 	var kb keyboard.MessageKeyboard
 	if err := json.Unmarshal([]byte(rawJSON), &kb); err != nil {
 		return "", fmt.Errorf("按钮 JSON 解析失败: %w", err)
@@ -194,10 +202,13 @@ func (c *Ctx) ReplyRowJson(rawJSON string) (string, error) {
 	if kb.Content == nil {
 		return "", fmt.Errorf("按钮 JSON 缺少 content 字段")
 	}
+	if strings.TrimSpace(md) == "" {
+		md = " "
+	}
 	return c.send(&dto.MessageToCreate{
 		MsgType:  dto.MarkdownMsg,
-		Content:  " ",
-		Markdown: &dto.Markdown{Content: " "},
+		Content:  md,
+		Markdown: &dto.Markdown{Content: md},
 		Keyboard: &kb,
 	})
 }
@@ -234,6 +245,31 @@ func (c *Ctx) ReplyVoice(voiceURL string) (string, error) {
 		return c.Bot.SendGroupVoice(c.Context, c.groupID, c.messageID, voiceURL)
 	case "c2c":
 		return c.Bot.SendC2CVoice(c.Context, c.userID, c.messageID, voiceURL)
+	default:
+		return "", ErrChannelImageUnsupported
+	}
+}
+
+// ReplyFile 以文件回复当前消息（file_type=4，URL 模式；pdf/zip 等通用文件）。仅群/私聊支持。
+func (c *Ctx) ReplyFile(fileURL string) (string, error) {
+	switch c.Source {
+	case "group":
+		return c.Bot.SendGroupFile(c.Context, c.groupID, c.messageID, fileURL)
+	case "c2c":
+		return c.Bot.SendC2CFile(c.Context, c.userID, c.messageID, fileURL)
+	default:
+		return "", ErrChannelImageUnsupported
+	}
+}
+
+// ReplyFileNamed 以文件回复并指定展示文件名（点歌的音频直链末段不可读，
+// 用「歌名 - 歌手.ext」命名）。仅群/私聊支持。
+func (c *Ctx) ReplyFileNamed(fileURL, filename string) (string, error) {
+	switch c.Source {
+	case "group":
+		return c.Bot.SendGroupFileNamed(c.Context, c.groupID, c.messageID, fileURL, filename)
+	case "c2c":
+		return c.Bot.SendC2CFileNamed(c.Context, c.userID, c.messageID, fileURL, filename)
 	default:
 		return "", ErrChannelImageUnsupported
 	}

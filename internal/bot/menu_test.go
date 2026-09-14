@@ -290,3 +290,51 @@ func TestAutoMenuConfig(t *testing.T) {
 		t.Errorf("群面板配置不对: %+v", cfg.Panels[0])
 	}
 }
+
+func TestCommandKeyboard(t *testing.T) {
+	b := &Bot{cmdIndex: map[string]*Command{}, prefixes: []string{"."}}
+	nop := func(*Ctx) {}
+	b.Command("ping", nop).Desc("在线检测")     // 无 usage → 点击直接发送
+	b.Command("点歌", nop).Usage("<歌名>")      // 有 usage → 点击仅填入输入框
+	b.Command("选", nop).RequireAtOrPrefix() // 排除：面板/按钮填入裸名不命中
+	b.Command("禁言", nop).AdminOnly()        // 排除：受限命令
+	b.Command("webhook", nop).OwnerOnly()   // 排除
+	b.Command("隐藏", nop).Hidden()           // 排除
+	for i := 0; i < 10; i++ {               // 凑满 12 个可见命令，验证 4/行分行与 24 上限不误伤
+		b.Command("命令"+strings.Repeat("x", i+1), nop)
+	}
+
+	kb := b.CommandKeyboard()
+	if len(kb.Content.Rows) != 3 { // 12 个可见命令 → 3 行
+		t.Fatalf("12 个命令应分 3 行, got %d", len(kb.Content.Rows))
+	}
+	for i, row := range kb.Content.Rows {
+		if len(row.Buttons) != 4 {
+			t.Errorf("第 %d 行应有 4 个按钮, got %d", i, len(row.Buttons))
+		}
+	}
+	ping, dianGe := kb.Content.Rows[0].Buttons[0], kb.Content.Rows[0].Buttons[1]
+	if ping.Action.Data != ".ping" || !ping.Action.Enter {
+		t.Errorf("无参命令应直接发送: %+v", ping.Action)
+	}
+	if dianGe.Action.Data != ".点歌" || dianGe.Action.Enter {
+		t.Errorf("带参命令应仅填入输入框: %+v", dianGe.Action)
+	}
+	raw, err := MarshalKeyboard(kb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`"data":".ping"`, `"data":".点歌"`, `"enter":true`} {
+		if !strings.Contains(raw, want) {
+			t.Errorf("键盘 JSON 缺 %q: %s", want, raw)
+		}
+	}
+	if strings.Contains(raw, "subscribe_data") {
+		t.Errorf("键盘 JSON 应剥除空 subscribe_data: %s", raw)
+	}
+	for _, banned := range []string{"选", "禁言", "webhook", "隐藏"} {
+		if strings.Contains(raw, `"data":".`+banned+`"`) {
+			t.Errorf("受限/隐藏命令 %q 不应出现在按钮里", banned)
+		}
+	}
+}
