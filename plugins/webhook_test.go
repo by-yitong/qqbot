@@ -2,6 +2,7 @@ package plugins
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"mime/multipart"
@@ -259,6 +260,22 @@ func TestWebhookHandle(t *testing.T) {
 	if get.StatusCode != http.StatusMethodNotAllowed {
 		t.Errorf("GET 应 405, got %d", get.StatusCode)
 	}
+
+	// 个人地址（用户 openid 命中 Users 表）：同样路由到发送步（502 = 未连接 api）
+	p.mu.Lock()
+	p.conf.Users["u1"] = "s1"
+	p.mu.Unlock()
+	respU, _ := http.Post(srv.URL+"/webhook/u1/s1", "text/plain", strings.NewReader("个人推送"))
+	respU.Body.Close()
+	if respU.StatusCode != http.StatusBadGateway {
+		t.Errorf("个人地址推送应 502（发送失败）, got %d", respU.StatusCode)
+	}
+	// 个人地址错误 sign → 403
+	respU2, _ := http.Post(srv.URL+"/webhook/u1/wrong", "text/plain", strings.NewReader("x"))
+	respU2.Body.Close()
+	if respU2.StatusCode != http.StatusForbidden {
+		t.Errorf("个人地址错误 sign 应 403, got %d", respU2.StatusCode)
+	}
 }
 
 func TestAllowedIP(t *testing.T) {
@@ -282,32 +299,87 @@ func TestAllowedIP(t *testing.T) {
 	}
 }
 
-// TestWebhookInstallOwnerOnly 验证 /webhook 注册为 OwnerOnly：非主人视角的 help
-// 与自动菜单/面板里都看不到它（命令本体在 internal/bot 的 owner 测试里覆盖）。
-func TestWebhookInstallOwnerOnly(t *testing.T) {
+// TestWebhookInstallVisibility 验证 /webhook 不再整体 OwnerOnly（个人地址对所有人
+// 开放）：陌生人与主人的 help 都能看到它，自动菜单也含它。
+func TestWebhookInstallVisibility(t *testing.T) {
 	b := bot.New(bot.Config{}, bot.WithPrefixes("/"), bot.WithOwners("boss"))
 	NewWebhook(t.TempDir()+"/webhook.json", "", "", nil).Install(b)
 
 	stranger := bot.NewEventCtx(b, "c2c", "help", "u9", "", "", "m", "", false)
-	if help := b.HelpFor(stranger); strings.Contains(help, "webhook") || strings.Contains(help, "推送地址") {
-		t.Errorf("非主人视角的 help 不应包含 webhook: %s", help)
+	if help := b.HelpFor(stranger); !strings.Contains(help, "webhook") {
+		t.Errorf("陌生人视角的 help 应包含 webhook（个人地址开放）: %s", help)
 	}
 	owner := bot.NewEventCtx(b, "c2c", "help", "boss", "", "", "m", "", false)
 	if help := b.HelpFor(owner); !strings.Contains(help, "webhook") {
 		t.Errorf("主人视角的 help 应包含 webhook: %s", help)
 	}
+	found := false
 	for _, it := range b.AutoMenuConfig().Menu.Items {
 		if it.SendMessage == "webhook" {
-			t.Errorf("自动菜单不应包含 OwnerOnly 命令: %+v", it)
+			found = true
 		}
+	}
+	if !found {
+		t.Error("自动菜单应包含 webhook（非 OwnerOnly 命令）")
 	}
 }
 
-// TestWebhookGenRouting 验证生成/作废的目标群解析与状态流转：群里触发=本群、
-// 私聊带参=参数群、私聊免参=最近记忆、无记忆不动状态；off 作废签名并清记忆。
-// 回复与私聊发送在测试里因未连接 api 而是 no-op，这里只验证状态侧。
-func TestWebhookGenRouting(t *testing.T) {
-	b := bot.New(bot.Config{}, bot.WithPrefixes("/"))
+// TestWebhookMatchTarget 验证推送目标判定：群表/个人表分别匹配 openid+sign，
+// 错配/未知 openid 一律拒绝。
+func TestWebhookMatchTarget(t *testing.T) {
+	p := NewWebhook(t.TempDir()+"/webhook.json", "", "", nil)
+	p.Install(bot.New(bot.Config{}))
+	p.mu.Lock()
+	p.conf.Groups["g1"] = "sg"
+	p.conf.Users["u1"] = "su"
+	p.mu.Unlock()
+
+	if toUser, ok := p.matchTarget("g1", "sg"); !ok || toUser {
+		t.Errorf("群 openid+sign 应匹配群推送: %v, %v", toUser, ok)
+	}
+	if toUser, ok := p.matchTarget("u1", "su"); !ok || !toUser {
+		t.Errorf("用户 openid+sign 应匹配个人推送: %v, %v", toUser, ok)
+	}
+	if _, ok := p.matchTarget("g1", "su"); ok {
+		t.Error("sign 与 openid 撤换不应匹配")
+	}
+	if _, ok := p.matchTarget("g1", "wrong"); ok {
+		t.Error("错误 sign 不应匹配")
+	}
+	if _, ok := p.matchTarget("nobody", "sg"); ok {
+		t.Error("未知 openid 不应匹配")
+	}
+}
+
+// TestWebhookGroupLabel 验证群名称显示回落：未连接 api（GetGroupInfo 失败）时
+// 退回纯 openid，且失败结果也被缓存（不打接口）。
+func TestWebhookGroupLabel(t *testing.T) {
+	p := NewWebhook(t.TempDir()+"/webhook.json", "", "", nil)
+	p.Install(bot.New(bot.Config{})) // 未连接：GetGroupInfo → ErrNotConnected
+	if got := p.groupLabel(context.Background(), "g1"); got != "g1" {
+		t.Errorf("取不到群名称应回落 openid, got %q", got)
+	}
+	p.mu.Lock()
+	cached, ok := p.groupNames["g1"]
+	p.mu.Unlock()
+	if !ok || cached != "" {
+		t.Errorf("失败结果也应缓存空值: cached=%q ok=%v", cached, ok)
+	}
+	p.mu.Lock()
+	p.groupNames["g2"] = "测试群"
+	p.mu.Unlock()
+	if got := p.groupLabel(context.Background(), "g2"); got != "「测试群」(g2)" {
+		t.Errorf("缓存命中应带群名, got %q", got)
+	}
+}
+
+// TestWebhookCmdRouting 验证命令路由与状态流转（回复与私聊发送在测试里因未连接
+// api 而是 no-op，只验证状态侧）：
+//   - 群里 /webhook：首次生成、再次沿用、new 才换新；非主人拒绝且无状态
+//   - 私聊 /webhook：个人地址 get-or-create；私聊带群 id：群地址 get-or-create
+//   - off：群里=本群、私聊=个人、私聊带参=指定群
+func TestWebhookCmdRouting(t *testing.T) {
+	b := bot.New(bot.Config{}, bot.WithPrefixes("/"), bot.WithOwners("boss"))
 	p := NewWebhook(t.TempDir()+"/webhook.json", "", "", nil)
 	p.Install(b)
 
@@ -316,81 +388,113 @@ func TestWebhookGenRouting(t *testing.T) {
 		c.Args = bot.Args{Args: args}
 		p.cmd(c)
 	}
+	groupSign := func(g string) string {
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		return p.conf.Groups[g]
+	}
+	userSign := func(u string) string {
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		return p.conf.Users[u]
+	}
 
-	// 群里触发生成：g1 有签名，且记为 u1 的最近目标群
-	run("group", "g1", "u1")
-	p.mu.Lock()
-	sign1, last := p.conf.Groups["g1"], p.lastGroup["u1"]
-	p.mu.Unlock()
+	// 群里首次触发生成；再次触发沿用同一签名（不再每次重新生成）
+	run("group", "g1", "boss")
+	sign1 := groupSign("g1")
 	if len(sign1) != 32 { // 16 字节 hex
-		t.Errorf("群里触发应为 g1 生成签名, got %q", sign1)
+		t.Fatalf("群里触发应为 g1 生成签名, got %q", sign1)
 	}
-	if last != "g1" {
-		t.Errorf("lastGroup[u1] = %q, want g1", last)
+	run("group", "g1", "boss")
+	if got := groupSign("g1"); got != sign1 {
+		t.Errorf("再次触发应沿用签名: %q -> %q", sign1, got)
 	}
-
-	// 私聊免参：用记忆的 g1 重新生成（签名应变化）
-	run("c2c", "", "u1")
-	p.mu.Lock()
-	sign2 := p.conf.Groups["g1"]
-	p.mu.Unlock()
+	// /webhook new：换新签名（旧地址即刻作废）
+	run("group", "g1", "boss", "new")
+	sign2 := groupSign("g1")
 	if sign2 == "" || sign2 == sign1 {
-		t.Errorf("私聊免参应基于记忆重新生成 g1 签名: %q -> %q", sign1, sign2)
+		t.Errorf("new 应重新生成签名: %q -> %q", sign1, sign2)
 	}
 
-	// 私聊裸带群 id（私聊兜底路径提示的形式）：为 g2 生成
-	run("c2c", "", "u1", "g2")
-	p.mu.Lock()
-	signG2 := p.conf.Groups["g2"]
-	p.mu.Unlock()
-	if len(signG2) != 32 {
-		t.Errorf("私聊 /webhook g2 应为 g2 生成签名, got %q", signG2)
+	// 非主人在群里触发：拒绝，不产生状态
+	run("group", "g9", "stranger")
+	run("group", "g9", "stranger", "new")
+	if got := groupSign("g9"); got != "" {
+		t.Errorf("非主人触发不应生成群签名, got %q", got)
 	}
 
-	// 无记忆的用户私聊免参：无目标群，不产生任何状态
-	run("c2c", "", "u9")
-	p.mu.Lock()
-	_, emptyGroup := p.conf.Groups[""]
-	u9last := p.lastGroup["u9"]
-	p.mu.Unlock()
-	if emptyGroup || u9last != "" {
-		t.Errorf("无目标群时不应写状态: groups[\"\"]=%v lastGroup[u9]=%q", emptyGroup, u9last)
+	// 私聊免参：个人地址 get-or-create（任何用户）
+	run("c2c", "", "u2")
+	usign1 := userSign("u2")
+	if len(usign1) != 32 {
+		t.Fatalf("私聊 /webhook 应生成个人签名, got %q", usign1)
+	}
+	run("c2c", "", "u2")
+	if got := userSign("u2"); got != usign1 {
+		t.Errorf("私聊再次触发应沿用个人签名: %q -> %q", usign1, got)
+	}
+	run("c2c", "", "u2", "new")
+	if got := userSign("u2"); got == "" || got == usign1 {
+		t.Errorf("私聊 /webhook new 应重新生成个人签名: %q -> %q", usign1, got)
 	}
 
-	// off g1：作废 g1 签名；记忆指向 g2，不应被误清
-	run("group", "g1", "u1", "off")
-	p.mu.Lock()
-	_, g1Exists := p.conf.Groups["g1"]
-	last = p.lastGroup["u1"]
-	p.mu.Unlock()
-	if g1Exists {
-		t.Error("off 应作废 g1 的签名")
+	// 私聊裸带群 id（群里触发失败后的兜底路径）：get-or-create
+	run("c2c", "", "boss", "g2")
+	gsign1 := groupSign("g2")
+	if len(gsign1) != 32 {
+		t.Fatalf("私聊 /webhook g2 应为 g2 生成签名, got %q", gsign1)
 	}
-	if last != "g2" {
-		t.Errorf("off g1 不应清掉指向 g2 的记忆, got %q", last)
+	run("c2c", "", "boss", "g2")
+	if got := groupSign("g2"); got != gsign1 {
+		t.Errorf("私聊再次取 g2 应沿用签名: %q -> %q", gsign1, got)
+	}
+	run("c2c", "", "boss", "new", "g2")
+	if got := groupSign("g2"); got == "" || got == gsign1 {
+		t.Errorf("私聊 /webhook new g2 应重新生成: %q -> %q", gsign1, got)
+	}
+	// 非主人私聊带群 id：拒绝
+	run("c2c", "", "stranger", "g8")
+	if got := groupSign("g8"); got != "" {
+		t.Errorf("非主人私聊带群 id 不应生成签名, got %q", got)
 	}
 
-	// off g2：作废签名，记忆随之清空
-	run("group", "g2", "u1", "off")
-	p.mu.Lock()
-	_, g2Exists := p.conf.Groups["g2"]
-	last = p.lastGroup["u1"]
-	p.mu.Unlock()
-	if g2Exists {
-		t.Error("off 应作废 g2 的签名")
+	// 频道触发：无群/个人语义，回用法，不产生状态
+	run("channel", "", "u2")
+	if got := userSign("u2"); got == "" {
+		t.Error("频道触发不应清掉已有个人签名")
 	}
-	if last != "" {
-		t.Errorf("off g2 后 lastGroup[u1] 应清空, got %q", last)
+
+	// off：群里=本群
+	run("group", "g2", "boss", "off")
+	if got := groupSign("g2"); got != "" {
+		t.Errorf("群里 off 应作废 g2 签名, got %q", got)
+	}
+	// off：私聊带参=指定群
+	run("c2c", "", "boss", "off", "g1")
+	if got := groupSign("g1"); got != "" {
+		t.Errorf("私聊 off g1 应作废签名, got %q", got)
+	}
+	// off：私聊免参=个人
+	run("c2c", "", "u2", "off")
+	if got := userSign("u2"); got != "" {
+		t.Errorf("私聊 off 应作废个人签名, got %q", got)
+	}
+	// 非主人群里 off：拒绝，不动作态
+	run("group", "g7", "boss")
+	run("group", "g7", "stranger", "off")
+	if got := groupSign("g7"); got == "" {
+		t.Error("非主人 off 不应作废群签名")
 	}
 }
 
-// TestWebhookConfSaveRoundTrip 落盘字段（groups/whitelist）不因新增 imgHost 而变。
+// TestWebhookConfSaveRoundTrip 落盘字段（groups/users/whitelist）与重载往返。
 func TestWebhookConfSaveRoundTrip(t *testing.T) {
 	file := filepath.Join(t.TempDir(), "webhook.json")
 	p := NewWebhook(file, "", "", nil)
-	p.conf = webhookConf{Groups: map[string]string{}} // 正常经 Install→load 初始化，这里直连
+	p.conf = webhookConf{Groups: map[string]string{}, Users: map[string]string{}} // 正常经 Install→load 初始化，这里直连
 	p.mu.Lock()
 	p.conf.Groups["g"] = "s"
+	p.conf.Users["u"] = "ps"
 	p.conf.Whitelist = []string{"1.2.3.4"}
 	p.save()
 	p.mu.Unlock()
@@ -403,7 +507,7 @@ func TestWebhookConfSaveRoundTrip(t *testing.T) {
 	if err := json.Unmarshal(data, &c); err != nil {
 		t.Fatal(err)
 	}
-	if c.Groups["g"] != "s" || len(c.Whitelist) != 1 {
+	if c.Groups["g"] != "s" || c.Users["u"] != "ps" || len(c.Whitelist) != 1 {
 		t.Errorf("落盘内容异常: %s", data)
 	}
 
@@ -412,9 +516,9 @@ func TestWebhookConfSaveRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	p2.mu.Lock()
-	ok := p2.conf.Groups["g"] == "s"
+	ok := p2.conf.Groups["g"] == "s" && p2.conf.Users["u"] == "ps"
 	p2.mu.Unlock()
 	if !ok {
-		t.Error("重载后应恢复 groups")
+		t.Error("重载后应恢复 groups/users")
 	}
 }

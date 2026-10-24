@@ -302,3 +302,48 @@ func TestHelp(t *testing.T) {
 		t.Errorf("help 不应包含 hidden: %q", help)
 	}
 }
+
+// grpEvent 构造一条 GROUP_MESSAGE_CREATE 原始事件（onGroupMessage 的输入）。
+func grpEvent(content, mentions string) []byte {
+	return []byte(`{"op":0,"t":"GROUP_MESSAGE_CREATE","d":{"id":"MSG1","group_openid":"G1",` +
+		`"author":{"id":"U1","username":"用户"},"content":"` + content + `","mentions":[` + mentions + `]}}`)
+}
+
+// TestOnGroupMessageIgnoresOtherBot 群全量消息未 @ 本 bot、却 @ 了其他机器人时
+// 整条忽略：「@其他机器人 /help」经 cleanContent 剥掉 @ 后会按裸命中规则匹配到
+// 本 bot 的命令。@ 人类（「/禁言 @某人」依赖 mentions）与 @ 本 bot 不受影响。
+func TestOnGroupMessageIgnoresOtherBot(t *testing.T) {
+	b := newTestBot()
+	var ran bool
+	b.Command("ping", func(c *Ctx) { ran = true })
+
+	call := func(content, mentions string) bool {
+		ran = false
+		if err := b.onGroupMessage(nil, grpEvent(content, mentions)); err != nil {
+			t.Fatalf("onGroupMessage: %v", err)
+		}
+		return ran
+	}
+
+	// @ 其他机器人 + 命令：忽略（本次修复的场景）
+	if call("<@B2> /ping", `{"id":"B2","member_openid":"B2","bot":true,"username":"其他机器人"}`) {
+		t.Error("@其他机器人的消息不应触发本 bot 命令")
+	}
+	// 裸命令：照常触发
+	if !call("/ping", "") {
+		t.Error("裸命令应照常触发")
+	}
+	// @ 人类成员：照常触发（裸文本命令 @ 目标用户的场景）
+	if !call("/ping <@U9>", `{"id":"U9","member_openid":"U9","bot":false,"username":"小明"}`) {
+		t.Error("@人类成员的命令不应被忽略")
+	}
+	// 同时 @ 本 bot 与其他机器人：本 bot 被点名，照常触发
+	if !call("<@ME> <@B2> /ping", `{"id":"ME","member_openid":"ME","bot":true,"is_you":true},`+
+		`{"id":"B2","member_openid":"B2","bot":true,"username":"其他机器人"}`) {
+		t.Error("@本 bot（含另一 bot）的消息应照常触发")
+	}
+	// 旧事件无 bot 标记：无法判断，保持原行为（触发）
+	if !call("<@B2> /ping", `{"id":"B2","member_openid":"B2","username":"未知账号"}`) {
+		t.Error("缺 bot 标记的旧事件应保持原有触发行为")
+	}
+}

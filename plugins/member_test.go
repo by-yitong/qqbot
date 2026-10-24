@@ -243,15 +243,20 @@ func TestBlacklistTargets(t *testing.T) {
 }
 
 func TestFormatBlacklist(t *testing.T) {
-	if got := formatBlacklist(nil); !strings.Contains(got, "为空") {
+	if got := formatBlacklist(nil, false); !strings.Contains(got, "为空") {
 		t.Errorf("空黑名单: %q", got)
 	}
 	users := []bot.GroupBlacklistUser{
 		{MemberOpenID: "AAAA1111BBBB", Username: "阳光少年", BannedAt: "2025-07-01T10:30:00+08:00"},
 	}
-	got := formatBlacklist(users)
+	got := formatBlacklist(users, false)
 	if !strings.Contains(got, "群黑名单共 1 人") || !strings.Contains(got, "阳光少年 拉黑于 2025-07-01 10:30  AAAA1111BBBB") {
 		t.Errorf("黑名单格式:\n%s", got)
+	}
+	// tagged 版每行带「解除」标签，text 填入完整的 解除拉黑 openid。
+	tagged := formatBlacklist(users, true)
+	if !strings.Contains(tagged, bot.CmdInputTag("解除拉黑 AAAA1111BBBB", "解除")) {
+		t.Errorf("tagged 版应带解除标签:\n%s", tagged)
 	}
 }
 

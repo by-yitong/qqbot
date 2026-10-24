@@ -26,16 +26,27 @@ import (
 	"qqbot/internal/utils"
 )
 
-// Webhook 是飞书式 webhook 插件：外部系统 POST 一个地址，bot 把内容主动发到对应群。
+// Webhook 是飞书式 webhook 插件：外部系统 POST 一个地址，bot 把内容主动发到对应群或个人。
 //
-//	群内 /webhook        → 生成/刷新本群的推送地址（含签名，group_id + sign 定位）。
-//	                       地址私聊发给触发的主人，群里只回确认——sign 是唯一凭证，
-//	                       不能在群聊里裸回（私聊主动消息需 q.qq.com 开通权限，
-//	                       失败会提示去私聊窗口重取：那里是被动回复，不依赖权限）。
-//	私聊 /webhook [群id] → 同上。缺省用该主人最近在群里触发过的群（内存记忆，重启即失）。
-//	/webhook off [群id]  → 作废地址（群里触发/私聊带参/私聊用记忆，同上）。
+//	群内 /webhook        → 获取本群推送地址：没有则生成，已有直接沿用（调用方存的
+//	                       地址不会因重取而失效）。地址私聊发给触发的主人并带群名称
+//	                       （/v2/groups/{id}/info 取，非白名单机器人取不到则退回 openid），
+//	                       群里只回确认——sign 是唯一凭证，不能在群聊里裸回（私聊主动
+//	                       消息需 q.qq.com 开通权限，失败会提示去私聊窗口重取：那里是
+//	                       被动回复，不依赖权限）。
+//	群内 /webhook new    → 重新生成本群地址（旧地址即刻作废）。
+//	私聊 /webhook        → 获取个人推送地址（没有则生成）：POST 到该地址的内容会
+//	                       私聊发回本人。任何用户可用——sign 只能推到自己，泄漏顶多
+//	                       被骚扰（/webhook off 作废即可）。
+//	私聊 /webhook new    → 重新生成个人地址（旧地址即刻作废）。
+//	私聊 /webhook [new] <群openid> → 获取/重新生成指定群的推送地址（群里触发失败后
+//	                       的兜底路径提示的就是这个形式）。
+//	/webhook off         → 群里=作废本群地址；私聊不带参=作废个人地址；
+//	                       /webhook off <群openid> 作废指定群地址。
 //	/webhook white add|del|list <ip> → 管理来源 IP 白名单
-//	POST {base}/webhook/{group_id}/{sign}  → 推送，三种 body：
+//	POST {base}/webhook/{openid}/{sign}  → 推送：openid 命中群则发群、命中用户则私聊
+//	                         发本人（群/用户 openid 命名空间独立，随机 sign 不会撞对）。
+//	                         三种 body：
 //	  1. 文本/Markdown：飞书机器人 JSON {"msg_type":"text|markdown","content":{"text":"..."}}
 //	     / {"text":"..."} / 纯文本；markdown 走原生 md（群内受官方语料校验/审核），
 //	     ?title=xx 让文本加粗标题（text 类型也会因此切成 markdown 发送）
@@ -48,36 +59,39 @@ import (
 //	     模式（图床未配置时兜底分片直传）；语音必须经图床（mp3/wav 转 silk）
 //	?title=xx 参数让文本部分走 markdown（加粗标题）。
 //
-// 命令仅主人可用（.OwnerOnly，BOT_OWNERS 配置）——生成地址等于放开外部向群里
-// 注入消息的入口，不能交给任意群成员。白名单为空时允许所有来源（内部用图省事；
-// 要收紧就配 white）。群主动消息需在 q.qq.com 开通权限，受官方频控/额度限制。
+// 群地址相关操作（群里触发/私聊带群 id/off 群地址/white）仅主人可用（BOT_OWNERS
+// 配置，handler 内校验）——群地址等于放开外部向群里注入消息的入口，不能交给任意
+// 群成员；个人地址对任何用户开放。白名单为空时允许所有来源（内部用图省事；要收紧
+// 就配 white）。主动消息需在 q.qq.com 开通权限，受官方频控/额度限制。
 type Webhook struct {
 	file       string         // 落盘路径（data/webhook.json）
 	listenAddr string         // HTTP 监听地址，空则不启服务
 	baseURL    string         // 生成地址时的公网前缀；空则用请求 Host
 	imgHost    *imgstore.Host // multipart 直传文件 → 公网 URL（未配置则该模式不可用）
 
-	bot       *bot.Bot
-	mu        sync.Mutex
-	conf      webhookConf
-	lastGroup map[string]string // 主人 openid -> 最近 gen/off 的目标群（私聊免参用，不落盘）
+	bot        *bot.Bot
+	mu         sync.Mutex
+	conf       webhookConf
+	groupNames map[string]string // 群 openid -> 群名称缓存（/v2/groups/{id}/info 是 30QPM 白名单接口，失败也缓存空值防反复打）
 
 	srv *http.Server
 }
 
 type webhookConf struct {
 	Groups    map[string]string `json:"groups"`    // 群 openid -> 签名
+	Users     map[string]string `json:"users"`     // 用户 openid -> 签名（个人推送）
 	Whitelist []string          `json:"whitelist"` // 来源 IP 白名单
 }
 
 // NewWebhook 创建插件。file 是配置落盘路径；listenAddr 空 = 不启 HTTP 服务（只留命令）；
 // imgHost 用于 multipart 直传文件发布公网 URL（nil = 直传不可用，JSON url 模式不受影响）。
 func NewWebhook(file, listenAddr, baseURL string, imgHost *imgstore.Host) *Webhook {
-	return &Webhook{file: file, listenAddr: listenAddr, baseURL: baseURL, imgHost: imgHost, lastGroup: map[string]string{}}
+	return &Webhook{file: file, listenAddr: listenAddr, baseURL: baseURL, imgHost: imgHost,
+		groupNames: map[string]string{}}
 }
 
 // NewWebhookFromEnv 读 WEBHOOK_LISTEN 等变量构造；未配监听地址返回 nil（不注册）。
-// /webhook 仅主人可用（BOT_OWNERS）；没配主人 = 命令谁都用不了，这里提醒一句。
+// 群地址相关操作仅主人（BOT_OWNERS）；没配主人 = 群地址谁都用不了，这里提醒一句。
 func NewWebhookFromEnv(imgHost *imgstore.Host) bot.Plugin {
 	addr := utils.EnvOr("WEBHOOK_LISTEN", "")
 	if addr == "" {
@@ -85,7 +99,7 @@ func NewWebhookFromEnv(imgHost *imgstore.Host) bot.Plugin {
 	}
 	log.Println("[webhook] 已启用 webhook 推送，监听 " + addr)
 	if len(utils.SplitList(os.Getenv("BOT_OWNERS"))) == 0 {
-		log.Println("[webhook] ⚠️ 未配置 BOT_OWNERS：/webhook 命令将对所有人拒绝（用 /id 查 openid 后配置）")
+		log.Println("[webhook] ⚠️ 未配置 BOT_OWNERS：/webhook 的群地址相关操作将对所有人拒绝（个人地址不受影响；用 /id 查 openid 后配置）")
 	}
 	return NewWebhook(utils.EnvOr("WEBHOOK_FILE", "./data/webhook.json"), addr, utils.EnvOr("WEBHOOK_BASE_URL", ""), imgHost)
 }
@@ -96,10 +110,12 @@ func (p *Webhook) Install(b *bot.Bot) {
 	if err := p.load(); err != nil {
 		log.Printf("[webhook] 配置加载失败（从空配置开始）: %v", err)
 	}
+	// 不再整体 OwnerOnly：个人地址（私聊 /webhook）对任何用户开放；群地址相关
+	// 路径在 handler 内校验主人（见 cmd）。
 	b.Command("webhook", p.cmd).
-		Desc("生成外部推送地址（POST 消息进本群）；white 管理 IP 白名单").
+		Desc("获取推送地址（POST 消息进来）：群里=本群、私聊=个人；new 重新生成；white 管理 IP 白名单").
 		Alias("推送地址").
-		OwnerOnly()
+		Category(bot.CatAdmin)
 	if p.listenAddr != "" {
 		b.OnStart(p.serve)
 	}
@@ -110,7 +126,7 @@ func (p *Webhook) Install(b *bot.Bot) {
 func (p *Webhook) load() error {
 	data, err := os.ReadFile(p.file)
 	if errors.Is(err, os.ErrNotExist) {
-		p.conf = webhookConf{Groups: map[string]string{}}
+		p.conf = webhookConf{Groups: map[string]string{}, Users: map[string]string{}}
 		return nil
 	}
 	if err != nil {
@@ -122,6 +138,9 @@ func (p *Webhook) load() error {
 	}
 	if c.Groups == nil {
 		c.Groups = map[string]string{}
+	}
+	if c.Users == nil {
+		c.Users = map[string]string{}
 	}
 	p.conf = c
 	return nil
@@ -149,31 +168,62 @@ func newSign() string {
 
 // --- 命令 ---
 
-func (p *Webhook) cmd(c *bot.Ctx) {
-	switch c.Args.Get(0) {
-	case "", "gen", "new":
-		p.cmdGen(c, c.Args.Get(1))
+// webhookUsage 用法提示（群里未知子命令 / 频道触发时回）。
+const webhookUsage = "用法：/webhook（获取本群推送地址，没有则生成）｜/webhook new（重新生成）｜" +
+	"/webhook off（作废）｜/webhook white add|del|list <ip>（仅主人）\n" +
+	"私聊发 /webhook 获取个人推送地址（POST 内容私聊发回你）；私聊 /webhook <群openid> 获取指定群地址"
 
+func (p *Webhook) cmd(c *bot.Ctx) {
+	a0 := c.Args.Get(0)
+	switch a0 {
 	case "white", "whitelist", "白名单":
-		p.cmdWhite(c)
+		p.requireOwner(c, p.cmdWhite)
+		return
 
 	case "off", "close":
 		p.cmdOff(c)
+		return
 
+	case "", "gen", "new":
 	default:
 		// 私聊里 /webhook <群openid>：群里触发失败后的兜底路径提示的就是这个形式，
 		// 群 id 直接跟在命令后。群里发未知子命令多半是手误，回用法即可。
-		if c.IsPrivate() {
-			p.cmdGen(c, c.Args.Get(0))
+		if !c.IsPrivate() {
+			c.ReplyText(webhookUsage)
 			return
 		}
-		c.ReplyText("用法：/webhook（生成本群推送地址，地址走私聊）｜/webhook off（作废）｜" +
-			"/webhook white add|del|list <ip>｜私聊里可用 /webhook <群openid>")
 	}
+
+	forceNew := a0 == "gen" || a0 == "new"
+	explicit := ""
+	if forceNew {
+		explicit = c.Args.Get(1)
+	} else if c.IsPrivate() {
+		explicit = a0
+	}
+
+	// 群地址路径（群里触发或私聊带群 id）仅主人——sign 等于放开外部向群里注入消息。
+	if c.IsGroup() || explicit != "" {
+		p.requireOwner(c, func(cc *bot.Ctx) { p.cmdGroup(cc, explicit, forceNew) })
+		return
+	}
+	if c.IsPrivate() {
+		p.cmdPersonal(c, forceNew) // 个人地址只能推给本人，对任何用户开放
+		return
+	}
+	c.ReplyText(webhookUsage) // 频道：群/个人地址都不适用
 }
 
-// targetGroup 解析命令针对的群：群里触发 = 本群；私聊触发 = explicit 参数里的群
-// openid，缺省用该主人最近在群里触发过的群（lastGroup 记忆，重启即失）。
+// requireOwner 主人检查（与框架 OwnerOnly 命令同一话术）：非主人拒绝，主人执行 h。
+func (p *Webhook) requireOwner(c *bot.Ctx, h func(*bot.Ctx)) {
+	if !c.IsOwner() {
+		c.ReplyText("该命令仅主人可用")
+		return
+	}
+	h(c)
+}
+
+// targetGroup 解析命令针对的群：群里触发 = 本群；私聊触发 = explicit 参数里的群 openid。
 func (p *Webhook) targetGroup(c *bot.Ctx, explicit string) (string, bool) {
 	if c.IsGroup() {
 		return c.GroupID(), true
@@ -181,34 +231,57 @@ func (p *Webhook) targetGroup(c *bot.Ctx, explicit string) (string, bool) {
 	if id := strings.TrimSpace(explicit); id != "" {
 		return id, true
 	}
-	p.mu.Lock()
-	id := p.lastGroup[c.UserID()]
-	p.mu.Unlock()
-	return id, id != ""
+	return "", false
 }
 
-// newGroupURL 为 groupID 生成新签名、落盘并返回推送地址；同时记住触发者最近
-// 的目标群（私聊免参用）。旧签名即刻作废。
-func (p *Webhook) newGroupURL(userID, groupID string) string {
+// groupLabel 群显示标签：优先群名称（GET /v2/groups/{id}/info，白名单接口、30QPM，
+// 结果连同失败一起进程内缓存，避免重取地址时反复打接口），格式 「名称」(openid)；
+// 取不到名称（如机器人不在接口白名单报 11253）回落纯 openid。
+func (p *Webhook) groupLabel(ctx context.Context, groupID string) string {
 	p.mu.Lock()
-	sign := newSign()
-	p.conf.Groups[groupID] = sign
-	p.save()
-	p.lastGroup[userID] = groupID
+	name, cached := p.groupNames[groupID]
 	p.mu.Unlock()
-	return p.url(groupID, sign)
+	if !cached {
+		if gi, err := p.bot.GetGroupInfo(ctx, groupID); err != nil {
+			log.Printf("[webhook] 获取群名称失败（显示回落 openid）: %v", err)
+		} else if gi != nil {
+			name = gi.GroupName
+		}
+		p.mu.Lock()
+		p.groupNames[groupID] = name
+		p.mu.Unlock()
+	}
+	if name == "" {
+		return groupID
+	}
+	return "「" + name + "」(" + groupID + ")"
 }
 
-// cmdGen 生成/刷新推送地址。私聊触发：被动回复直接带地址（不依赖主动消息权限）；
-// 群里触发：地址走私聊发主人（主动消息），群里只回确认，不暴露 sign。
-func (p *Webhook) cmdGen(c *bot.Ctx, explicitGroup string) {
-	groupID, ok := p.targetGroup(c, explicitGroup)
+// cmdGroup 获取/生成本群（或 explicit 指定群）的推送地址：已有直接沿用（不再每次
+// 重新生成，调用方脚本里存的地址不会失效），forceNew 才换新签名（旧签名即刻作废）。
+// 地址走私聊发给主人并带群名称；群里只回确认，不暴露 sign。私聊触发：被动回复
+// 直接带地址（不依赖主动消息权限）。
+func (p *Webhook) cmdGroup(c *bot.Ctx, explicit string, forceNew bool) {
+	groupID, ok := p.targetGroup(c, explicit)
 	if !ok {
-		c.ReplyText("请告诉我目标群：群里直接发 /webhook（生成本群地址），或私聊发 /webhook <群openid>")
+		c.ReplyText("请告诉我目标群：群里直接发 /webhook（获取本群地址），或私聊发 /webhook <群openid>")
 		return
 	}
-	url := p.newGroupURL(c.UserID(), groupID)
-	dm := "群 " + groupID + " 的推送地址（旧地址即刻作废）：\n" + url +
+	p.mu.Lock()
+	sign, exists := p.conf.Groups[groupID]
+	created := !exists || forceNew
+	if created {
+		sign = newSign()
+		p.conf.Groups[groupID] = sign
+		p.save()
+	}
+	p.mu.Unlock()
+
+	state := "（已有，直接沿用；换新发 /webhook new）"
+	if created {
+		state = "（新生成，旧地址即刻作废）"
+	}
+	dm := "群 " + p.groupLabel(c.Context, groupID) + " 的推送地址" + state + "：\n" + p.url(groupID, sign) +
 		"\nPOST 调用：文本/Markdown 用 {\"msg_type\":\"text|markdown\",\"content\":{\"text\":\"...\"}} 或纯文本；" +
 		"发文件用 {\"msg_type\":\"image|video|voice|file\",\"content\":{\"url\":\"https://...\"}}，或 multipart 直传（file 字段）"
 
@@ -217,30 +290,74 @@ func (p *Webhook) cmdGen(c *bot.Ctx, explicitGroup string) {
 		return
 	}
 	// 私聊主动消息（msgAnchor 空）需 q.qq.com 开通权限、受额度限制；失败给自救路径：
-	// 私聊窗口重取是被动回复，必达。
+	// 私聊窗口重取是被动回复，必达（get-or-create 语义下重取拿到的是同一地址）。
 	if _, err := c.Bot.SendC2CText(c.Context, c.UserID(), "", dm); err != nil {
-		c.ReplyText("地址已生成，但私聊发送失败（可能未开通主动消息或额度用尽）。\n" +
-			"请到 bot 的私聊窗口发送（会重新生成，旧地址作废）：\n/webhook " + groupID)
+		c.ReplyText("地址已就绪，但私聊发送失败（可能未开通主动消息或额度用尽）。\n" +
+			"请到 bot 的私聊窗口发送（会拿到同一地址，不会作废重建）：\n/webhook " + groupID)
 		return
 	}
-	c.ReplyText("本群推送地址已生成，已私聊发给你（旧地址即刻作废）")
+	c.ReplyText("本群推送地址已私聊发给你")
 }
 
-// cmdOff 作废推送地址并清掉该主人的目标群记忆。
+// cmdPersonal 私聊获取/生成个人推送地址：POST 到该地址的内容会私聊发回本人。
+// 直接回复在当前私聊（被动回复，必达，不依赖主动消息权限）。
+func (p *Webhook) cmdPersonal(c *bot.Ctx, forceNew bool) {
+	uid := c.UserID()
+	p.mu.Lock()
+	sign, exists := p.conf.Users[uid]
+	created := !exists || forceNew
+	if created {
+		sign = newSign()
+		p.conf.Users[uid] = sign
+		p.save()
+	}
+	p.mu.Unlock()
+
+	state := "（已有，直接沿用；换新发 /webhook new）"
+	if created {
+		state = "（新生成，旧地址即刻作废）"
+	}
+	c.ReplyText("你的个人推送地址" + state + "，POST 调用后内容会私聊发给你：\n" + p.url(uid, sign) +
+		"\nPOST 调用：文本/Markdown 用 {\"msg_type\":\"text|markdown\",\"content\":{\"text\":\"...\"}} 或纯文本；" +
+		"发文件用 {\"msg_type\":\"image|video|voice|file\",\"content\":{\"url\":\"https://...\"}}，或 multipart 直传（file 字段）\n" +
+		"作废发 /webhook off")
+}
+
+// cmdOff 作废推送地址：群里=本群地址（仅主人）；私聊带群 id=该群地址（仅主人）、
+// 不带=个人地址（本人在私聊发即可）。
 func (p *Webhook) cmdOff(c *bot.Ctx) {
-	groupID, ok := p.targetGroup(c, c.Args.Get(1))
-	if !ok {
-		c.ReplyText("请告诉我目标群：群里直接发 /webhook off，或私聊发 /webhook off <群openid>")
+	arg := strings.TrimSpace(c.Args.Get(1))
+	if c.IsGroup() || arg != "" {
+		p.requireOwner(c, func(cc *bot.Ctx) {
+			// 群里固定作废本群（同 targetGroup：explicit 仅私聊生效）
+			groupID := arg
+			if cc.IsGroup() {
+				groupID = cc.GroupID()
+			}
+			p.mu.Lock()
+			delete(p.conf.Groups, groupID)
+			p.save()
+			p.mu.Unlock()
+			cc.ReplyText("群 " + p.groupLabel(cc.Context, groupID) + " 的推送地址已作废")
+		})
+		return
+	}
+	if !c.IsPrivate() {
+		c.ReplyText(webhookUsage)
 		return
 	}
 	p.mu.Lock()
-	delete(p.conf.Groups, groupID)
-	if p.lastGroup[c.UserID()] == groupID {
-		delete(p.lastGroup, c.UserID())
+	_, exists := p.conf.Users[c.UserID()]
+	if exists {
+		delete(p.conf.Users, c.UserID())
+		p.save()
 	}
-	p.save()
 	p.mu.Unlock()
-	c.ReplyText("群 " + groupID + " 的推送地址已作废")
+	if !exists {
+		c.ReplyText("你还没有个人推送地址（私聊发 /webhook 生成）")
+		return
+	}
+	c.ReplyText("你的个人推送地址已作废")
 }
 
 func (p *Webhook) cmdWhite(c *bot.Ctx) {
@@ -325,7 +442,7 @@ func (p *Webhook) serve(ctx context.Context) {
 		log.Printf("[webhook] HTTP 监听失败（推送功能不可用）: %v", err)
 		return
 	}
-	log.Printf("[webhook] 推送服务已监听 http://%s/webhook/{group_id}/{sign}", ln.Addr())
+	log.Printf("[webhook] 推送服务已监听 http://%s/webhook/{openid}/{sign}（群 openid 发群、用户 openid 私聊发本人）", ln.Addr())
 	go func() {
 		<-ctx.Done()
 		_ = p.srv.Close()
@@ -335,28 +452,28 @@ func (p *Webhook) serve(ctx context.Context) {
 	}
 }
 
-// handle 处理 POST /webhook/{group_id}/{sign}。
+// handle 处理 POST /webhook/{openid}/{sign}（群 openid 发群、用户 openid 私聊发本人）。
 func (p *Webhook) handle(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "POST only", http.StatusMethodNotAllowed)
 		return
 	}
-	parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/") // webhook/{group}/{sign}
+	parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/") // webhook/{openid}/{sign}
 	if len(parts) != 3 {
 		http.Error(w, "bad path", http.StatusNotFound)
 		return
 	}
-	groupID, sign := parts[1], parts[2]
+	openID, sign := parts[1], parts[2]
 
 	p.mu.Lock()
-	want, ok := p.conf.Groups[groupID]
 	wl := append([]string(nil), p.conf.Whitelist...)
 	p.mu.Unlock()
 	if !allowedIP(wl, r) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
-	if !ok || sign != want {
+	toUser, ok := p.matchTarget(openID, sign)
+	if !ok {
 		http.Error(w, "invalid sign", http.StatusForbidden)
 		return
 	}
@@ -368,8 +485,12 @@ func (p *Webhook) handle(w http.ResponseWriter, r *http.Request) {
 	}
 	// 可选 ?title=xx：带了文本部分就走 markdown（加粗标题 + 内容原样拼接，内容本身
 	// 是 md，不能再包 ```，否则渲染成一坨代码块）。title 只是展示参数，不参与路径/sign 校验。
-	if err := p.deliver(r.Context(), groupID, pl, strings.TrimSpace(r.URL.Query().Get("title"))); err != nil {
-		log.Printf("[webhook] 发送到群 %s 失败: %v", groupID, err)
+	if err := p.deliver(r.Context(), openID, toUser, pl, strings.TrimSpace(r.URL.Query().Get("title"))); err != nil {
+		if toUser {
+			log.Printf("[webhook] 私聊推送到 %s 失败: %v", openID, err)
+		} else {
+			log.Printf("[webhook] 发送到群 %s 失败: %v", openID, err)
+		}
 		http.Error(w, "send: "+err.Error(), http.StatusBadGateway)
 		return
 	}
@@ -377,6 +498,22 @@ func (p *Webhook) handle(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte(`{"StatusCode":0,"StatusMessage":"success","code":0,"data":{},"msg":"success"}`))
+}
+
+// matchTarget 校验 openid+sign 并判定推送目标：先群表后个人表（群/用户 openid 命名
+// 空间独立，两边 sign 都是随机 16 字节 hex，不会撞对）。toUser=true 表示个人推送。
+func (p *Webhook) matchTarget(id, sign string) (toUser, ok bool) {
+	p.mu.Lock()
+	wantGroup, okGroup := p.conf.Groups[id]
+	wantUser, okUser := p.conf.Users[id]
+	p.mu.Unlock()
+	switch {
+	case okGroup && sign == wantGroup:
+		return false, true
+	case okUser && sign == wantUser:
+		return true, true
+	}
+	return false, false
 }
 
 // --- 请求负载解析 ---
@@ -568,54 +705,84 @@ func urlExtOf(rawURL string) string {
 	return strings.ToLower(strings.TrimPrefix(path.Ext(u.Path), "."))
 }
 
-// deliver 把负载发进群：文本部分先发（msg_type=markdown 或 ?title= 走原生
-// markdown，其余纯文本；两者同在时 title 作加粗标题拼在最前），富媒体随后一条。
-// 主动消息（msgAnchor 空）需 q.qq.com 开通权限，受官方频控/额度限制。
-func (p *Webhook) deliver(ctx context.Context, groupID string, pl webhookPayload, title string) error {
+// deliver 把负载发到目标（群或个人私聊）：文本部分先发（msg_type=markdown 或
+// ?title= 走原生 markdown，其余纯文本；两者同在时 title 作加粗标题拼在最前），
+// 富媒体随后一条。主动消息（msgAnchor 空）需 q.qq.com 开通权限，受官方频控/额度限制。
+func (p *Webhook) deliver(ctx context.Context, openID string, toUser bool, pl webhookPayload, title string) error {
+	// 群/私聊的 Bot 级发送方法一一对应，按目标选一组，后续编排只写一遍。
+	type sendGroup struct {
+		text, markdown            func(string) error
+		image, video, voice, file func(string) error
+		fileBytes                 func(string, []byte) error
+		mediaBytes                func(int, string, []byte) error
+	}
+	var s sendGroup
+	if toUser {
+		s = sendGroup{
+			text:      func(t string) error { _, err := p.bot.SendC2CText(ctx, openID, "", t); return err },
+			markdown:  func(m string) error { _, err := p.bot.SendC2CMarkdown(ctx, openID, "", m); return err },
+			image:     func(u string) error { _, err := p.bot.SendC2CImage(ctx, openID, "", u); return err },
+			video:     func(u string) error { _, err := p.bot.SendC2CVideo(ctx, openID, "", u); return err },
+			voice:     func(u string) error { _, err := p.bot.SendC2CVoice(ctx, openID, "", u); return err },
+			file:      func(u string) error { _, err := p.bot.SendC2CFile(ctx, openID, "", u); return err },
+			fileBytes: func(n string, d []byte) error { _, err := p.bot.SendC2CFileBytes(ctx, openID, "", n, d); return err },
+			mediaBytes: func(ft int, n string, d []byte) error {
+				_, err := p.bot.SendC2CMediaBytes(ctx, openID, "", ft, n, d)
+				return err
+			},
+		}
+	} else {
+		s = sendGroup{
+			text:      func(t string) error { _, err := p.bot.SendGroupText(ctx, openID, "", t); return err },
+			markdown:  func(m string) error { _, err := p.bot.SendGroupMarkdown(ctx, openID, "", m); return err },
+			image:     func(u string) error { _, err := p.bot.SendGroupImage(ctx, openID, "", u); return err },
+			video:     func(u string) error { _, err := p.bot.SendGroupVideo(ctx, openID, "", u); return err },
+			voice:     func(u string) error { _, err := p.bot.SendGroupVoice(ctx, openID, "", u); return err },
+			file:      func(u string) error { _, err := p.bot.SendGroupFile(ctx, openID, "", u); return err },
+			fileBytes: func(n string, d []byte) error { _, err := p.bot.SendGroupFileBytes(ctx, openID, "", n, d); return err },
+			mediaBytes: func(ft int, n string, d []byte) error {
+				_, err := p.bot.SendGroupMediaBytes(ctx, openID, "", ft, n, d)
+				return err
+			},
+		}
+	}
+
 	if pl.text != "" {
-		var err error
 		if pl.msgType == "markdown" || title != "" {
 			md := pl.text
 			if title != "" {
 				md = fmt.Sprintf("**%s**\n\n%s", title, md)
 			}
-			_, err = p.bot.SendGroupMarkdown(ctx, groupID, "", md)
-		} else {
-			_, err = p.bot.SendGroupText(ctx, groupID, "", pl.text)
-		}
-		if err != nil {
+			if err := s.markdown(md); err != nil {
+				return err
+			}
+		} else if err := s.text(pl.text); err != nil {
 			return err
 		}
 	}
 	// 直传字节：file 分片直传；image/video 图床缺配时兜底分片。
 	if pl.fileData != nil {
-		var err error
 		switch pl.msgType {
 		case "image":
-			_, err = p.bot.SendGroupMediaBytes(ctx, groupID, "", 1, pl.fileName, pl.fileData)
+			return s.mediaBytes(1, pl.fileName, pl.fileData)
 		case "video":
-			_, err = p.bot.SendGroupMediaBytes(ctx, groupID, "", 2, pl.fileName, pl.fileData)
+			return s.mediaBytes(2, pl.fileName, pl.fileData)
 		default: // file
-			_, err = p.bot.SendGroupFileBytes(ctx, groupID, "", pl.fileName, pl.fileData)
+			return s.fileBytes(pl.fileName, pl.fileData)
 		}
-		return err
 	}
 	if pl.url == "" {
 		return nil
 	}
 	switch pl.msgType {
 	case "image":
-		_, err := p.bot.SendGroupImage(ctx, groupID, "", pl.url)
-		return err
+		return s.image(pl.url)
 	case "video":
-		_, err := p.bot.SendGroupVideo(ctx, groupID, "", pl.url)
-		return err
+		return s.video(pl.url)
 	case "voice":
-		_, err := p.bot.SendGroupVoice(ctx, groupID, "", pl.url)
-		return err
+		return s.voice(pl.url)
 	default: // file：官方不拉 URL，服务端代下载后分片直传
-		_, err := p.bot.SendGroupFile(ctx, groupID, "", pl.url)
-		return err
+		return s.file(pl.url)
 	}
 }
 

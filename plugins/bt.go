@@ -35,7 +35,8 @@ func NewBtFromEnv() bot.Plugin {
 func (p *BtPlugin) Install(b *bot.Bot) {
 	b.Command("panel", p.run).
 		Desc("查看宝塔面板服务器状态").
-		Alias("宝塔", "bt")
+		Alias("宝塔", "bt").
+		Category(bot.CatGeneral)
 }
 
 func (p *BtPlugin) run(c *bot.Ctx) {

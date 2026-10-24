@@ -10,14 +10,13 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/tencent-connect/botgo"
-	"github.com/tencent-connect/botgo/dto"
-	"github.com/tencent-connect/botgo/dto/message"
-	"github.com/tencent-connect/botgo/event"
-	"github.com/tencent-connect/botgo/openapi"
-	"github.com/tencent-connect/botgo/token"
 	"github.com/tidwall/gjson"
-	"golang.org/x/oauth2"
+	"qqbot/pkg/botgo"
+	"qqbot/pkg/botgo/dto"
+	"qqbot/pkg/botgo/dto/message"
+	"qqbot/pkg/botgo/event"
+	"qqbot/pkg/botgo/openapi"
+	"qqbot/pkg/botgo/token"
 
 	"qqbot/internal/imgstore"
 )
@@ -63,9 +62,8 @@ type Bot struct {
 
 	api openapi.OpenAPI // 在 Run 中就绪
 
-	tokenSource oauth2.TokenSource // 在 Run 中就绪（发图上传富媒体用）
-	appID       string             // 在 Run 中就绪（上传富媒体 X-Union-Appid 头）
-	mediaHost   *imgstore.Host     // 媒体托管（WithMediaHost；语音转码产物发布公网 URL 用）
+	appID     string         // 在 Run 中就绪（上传富媒体 X-Union-Appid 头）
+	mediaHost *imgstore.Host // 媒体托管（WithMediaHost；语音转码产物发布公网 URL 用）
 
 	mu          sync.RWMutex
 	cmds        []*Command
@@ -135,6 +133,15 @@ func (b *Bot) IsOwner(userID string) bool {
 
 // NC 返回底层 openapi.OpenAPI（需要直接调官方接口时用）。连接前为 nil。
 func (b *Bot) NC() openapi.OpenAPI { return b.api }
+
+// openapi 返回已就绪的 OpenAPI 实例；未连接（Run 之前/连接失败）报 ErrNotConnected。
+// 本包各协议委托方法（群管理/菜单/上传/撤回）统一经此做连接保护。
+func (b *Bot) openapi() (openapi.OpenAPI, error) {
+	if b.api == nil {
+		return nil, ErrNotConnected
+	}
+	return b.api, nil
+}
 
 // selfOpenID 返回机器人自身的 openid（Me() 拉取后缓存；失败不缓存，下次重试）。
 // api 未就绪或拉取失败返回空（此时 Mentions() 不排除自身）。
@@ -288,7 +295,6 @@ func (b *Bot) Run(ctx context.Context) error {
 		return err
 	}
 	b.api = botgo.NewOpenAPI(creds.AppID, ts)
-	b.tokenSource = ts // 供发图上传富媒体（自行 multipart POST，需 token）
 	b.appID = creds.AppID
 
 	b.startOnce.Do(func() {
@@ -297,8 +303,8 @@ func (b *Bot) Run(ctx context.Context) error {
 		b.mu.RUnlock()
 		if b.opts.EnableHelp && !exists {
 			b.Command(b.helpName, func(c *Ctx) {
-				_, _ = c.ReplyText(c.Bot.HelpFor(c))
-			}).Desc("显示命令列表")
+				c.ReplyTaggedOrPlain(c.Bot.HelpMarkdownFor(c), c.Bot.HelpFor(c))
+			}).Desc("显示命令列表").Category(CatGeneral)
 		}
 	})
 
@@ -372,6 +378,11 @@ func (b *Bot) onGroupMessage(_ *dto.WSPayload, msg []byte) error {
 	}
 	// 全量群消息里也可能 @ 了 bot（mentions.is_you=true）；botgo 的 dto.User 未带 is_you 字段，用 gjson 补判。
 	atBot := gjson.Get(string(msg), "d.mentions.#(is_you==true)").Exists()
+	// 没有 @ 本 bot、却 @ 了其他机器人（如「@其他机器人 /help」）：消息是对别的 bot 说的。
+	// cleanContent 会把 @ 结构剥掉，剩下的命令文本会按裸命中规则匹配到本 bot，须整条忽略。
+	if !atBot && mentionsOtherBot(msg) {
+		return nil
+	}
 	c := b.fromMessage(context.Background(), "group", &m, atBot)
 	c.quote = extractQuote(msg) // 引用回复时，被引用的原文在 msg_elements 里
 	b.EnrichGroupRoles(c, msg)
@@ -411,6 +422,22 @@ func (b *Bot) EnrichGroupRoles(c *Ctx, raw []byte) {
 		}
 		return true
 	})
+}
+
+// mentionsOtherBot 报告群消息事件的 mentions 里是否 @ 了其他机器人
+// （d.mentions[].bot=true 且非 is_you）。官方 2026-08 起下发 bot 标记；
+// 旧事件缺该字段时返回 false（保持原有行为）。人类 @ 不算（裸文本命令
+// 如「/禁言 @某人」依赖 mentions 定位目标，不能被误伤）。
+func mentionsOtherBot(raw []byte) bool {
+	found := false
+	gjson.GetBytes(raw, "d.mentions").ForEach(func(_, m gjson.Result) bool {
+		if m.Get("bot").Bool() && !m.Get("is_you").Bool() {
+			found = true
+			return false // 找到即停
+		}
+		return true
+	})
+	return found
 }
 
 // extractQuote 从群消息的 msg_elements 提取被引用消息的文本（引用回复场景）。

@@ -62,14 +62,15 @@ func main() {
 	b := bot.New(bot.Config{AppID: appID, AppSecret: appSecret},
 		// 兼容旧变量名 BOT_PREFIX（单数）；BOT_PREFIXES 优先。
 		bot.WithPrefixes(parsePrefixes(utils.EnvOr("BOT_PREFIXES", utils.EnvOr("BOT_PREFIX", "/")))...),
-		// 主人 openid（BOT_OWNERS，逗号分隔）：OwnerOnly 命令（如 /webhook）仅主人可用。
+		// 主人 openid（BOT_OWNERS，逗号分隔）：OwnerOnly 命令（如 /禁言）与
+		// /webhook 群地址等 handler 内校验主人的操作仅主人可用。
 		// 自己的 openid 用 /id 命令查。fail-closed：不配置则这些命令无人可用。
 		bot.WithOwners(utils.SplitList(os.Getenv("BOT_OWNERS"))...),
 		// 语音自动转码产物经图床发布公网 URL（未配图床则只能发已是 silk 的 URL）。
 		bot.WithMediaHost(imgHost),
 	)
 	if len(utils.SplitList(os.Getenv("BOT_OWNERS"))) > 0 {
-		log.Println("[main] 已配置主人，OwnerOnly 命令（如 /webhook）仅主人可用")
+		log.Println("[main] 已配置主人，OwnerOnly 命令（如 /禁言）仅主人可用")
 	}
 
 	// /id 查发送者自己的 openid / 群 openid：配置 BOT_OWNERS、JOIN_ADMINS 等白名单用。
@@ -79,7 +80,7 @@ func main() {
 			out += "\n本群 openid：" + c.GroupID()
 		}
 		_, _ = c.ReplyText(out)
-	}).Desc("查看自己的 openid（配置主人/白名单用）").HideBotMenu()
+	}).Desc("查看自己的 openid（配置主人/白名单用）").HideBotMenu().Category(bot.CatGeneral)
 
 	// 日志中间件：每条消息打印一行（openid 不是 QQ 号）。
 	b.Use(func(next bot.MessageHandler) bot.MessageHandler {
@@ -122,6 +123,7 @@ func main() {
 		plugins.NewHappy(sched, utils.EnvOr("HAPPY_DAILY_TARGET", "")),
 		plugins.NewSystem(),
 		plugins.NewZhiPu(),
+		plugins.NewZhihuFromEnv(),
 		plugins.NewOnline("AD649FF82C450D9E5BF229974329E36C", "🤖 机器人已上线"),
 		plugins.NewBtFromEnv(),
 		imgbedPlug,
@@ -218,36 +220,27 @@ func installMenu(b *bot.Bot) {
 				return
 			}
 			if len(m.Items) == 0 {
-				replyWithCommandButtons(c, "当前未设置菜单。.menu apply 发布 / .menu clear 清除")
+				c.ReplyTaggedOrPlain(
+					"当前未设置菜单。"+bot.CmdInputTag("menu apply", "立即发布")+bot.CmdInputTag("menu clear", "清除"),
+					"当前未设置菜单。menu apply 发布 / menu clear 清除")
 				return
 			}
 			names := make([]string, 0, len(m.Items))
 			for _, it := range m.Items {
 				names = append(names, it.Name)
 			}
-			replyWithCommandButtons(c, "当前菜单："+strings.Join(names, "、")+".menu apply 重新发布 / .menu clear 清除")
+			c.ReplyTaggedOrPlain(
+				"当前菜单："+strings.Join(names, "、")+bot.CmdInputTag("menu apply", "重新发布")+bot.CmdInputTag("menu clear", "清除"),
+				"当前菜单："+strings.Join(names, "、")+".menu apply 重新发布 / .menu clear 清除")
 		}
-	}).Desc("管理自定义菜单与指令面板（apply 发布 / clear 清除 / 无参查看）").Alias("菜单")
+	}).Desc("管理自定义菜单与指令面板（apply 发布 / clear 清除 / 无参查看）").Alias("菜单").Category(bot.CatGeneral)
 
 	// 中文帮助命令（内置 help 之外）：菜单/面板按钮填入的中文词要能直接命中命令。
-	// 回复 = 命令列表 + 全量命令按钮键盘合一条消息（点按钮直达命令；需要参数的
-	// 命令点击只填入输入框）；markdown 被审核拒发时降级纯文本。
+	// 回复是标签版命令列表——每条命令的名字渲染成官方内嵌指令标签，点击填入输入框
+	// （带参数的命令补好空格，接着敲参数）；频道/markdown 被拒发时降级纯文本。
 	b.Command("帮助", func(c *bot.Ctx) {
-		replyWithCommandButtons(c, c.Bot.HelpFor(c))
-	}).Desc("显示命令列表")
-}
-
-// replyWithCommandButtons 把文本与命令按钮键盘合成一条 markdown 消息回复；
-// 失败（按钮序列化/语料审核）降级纯文本。
-func replyWithCommandButtons(c *bot.Ctx, text string) {
-	if raw, err := bot.MarshalKeyboard(c.Bot.CommandKeyboard()); err == nil {
-		if _, err := c.ReplyMarkdownKeyboard(text, raw); err == nil {
-			return
-		} else {
-			log.Printf("[menu] 帮助/菜单按钮发送失败，降级纯文本: %v", err)
-		}
-	}
-	_, _ = c.ReplyText(text)
+		c.ReplyTaggedOrPlain(c.Bot.HelpMarkdownFor(c), c.Bot.HelpFor(c))
+	}).Desc("显示命令列表").Category(bot.CatGeneral)
 }
 
 // parsePrefixes 把 ".|/" 解析成 []string。用 | 分隔：逗号在中英文/全角半角间太容易

@@ -1,6 +1,7 @@
 package bot
 
-// 自定义菜单与指令面板（官方 2026 新增，botgo v0.2.1 未覆盖，自行 HTTP 调用）。
+// 自定义菜单与指令面板（协议实现在 pkg/botgo：GET/PUT /v2/menu、POST/DELETE /v2/panels）。
+// 本层保留发布编排（配置加载 / 按命令自动生成 / 覆盖式应用）。
 //
 //   - 自定义菜单：C2C 单聊窗口底部按钮栏，PUT /v2/menu 覆盖式设置，对所有用户生效。
 //     按钮类型 send_message（点击把文本填入输入框，用户仍需按发送）/ link / menu（折叠）。
@@ -9,201 +10,88 @@ package bot
 // 文档：https://bot.q.qq.com/wiki/develop/api-v2/server-inter/menu-panel/
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
 	"os"
-	"strings"
 
-	"github.com/tencent-connect/botgo/dto/keyboard"
-	"github.com/tidwall/gjson"
+	"qqbot/pkg/botgo/dto"
 )
 
 // AutoPanelRemark 是本程序自动创建面板的 remark 标记：重新发布时按它识别并删除旧面板
 // （面板是追加式的，不删会堆积到 20 个上限）。
 const AutoPanelRemark = "qqbot-auto"
 
-// --- 自定义菜单（PUT /v2/menu）---
-
 // Menu 是全局自定义菜单（C2C 场景）。
-type Menu struct {
-	// 不用 omitempty：清空菜单需要显式发 {"items":[]}（omitempty 会把空列表序列化没，
-	// PUT {} 语义不明）。
-	Items []MenuItem `json:"items"` // 最多 10 个，按顺序从左到右展示
-}
+type Menu = dto.Menu
 
-// MenuItem 是一级菜单项。Type：switch / send_message / link / menu（折叠子菜单）。
-// 名称最多 10 字符（中文按 2 计）。
-type MenuItem struct {
-	Name         string        `json:"name,omitempty"`
-	Type         string        `json:"type,omitempty"`
-	SubMenuItems []SubMenuItem `json:"sub_menu_items,omitempty"` // 仅 type=menu，最多 5 个
-	SendMessage  string        `json:"send_message,omitempty"`   // 仅 send_message：点击后填入输入框
-	Link         string        `json:"link,omitempty"`           // 仅 link：必须 https
-}
+// MenuItem 是一级菜单项。
+type MenuItem = dto.MenuItem
 
-// SubMenuItem 是二级菜单项。Type：send_message / link（不支持再折叠）。
-type SubMenuItem struct {
-	Name        string `json:"name,omitempty"` // 最多 14 字符（约 7 个中文）
-	Type        string `json:"type,omitempty"`
-	SendMessage string `json:"send_message,omitempty"`
-	Link        string `json:"link,omitempty"`
-}
+// SubMenuItem 是二级菜单项。
+type SubMenuItem = dto.SubMenuItem
 
-// --- 指令面板（POST /v2/panels）---
-
-// PanelReq 是创建指令面板的请求。Scope：c2c/group/channel/dm；
-// TargetType：all（全局）/ specific（仅 c2c、group 支持指定用户/群）。
-type PanelReq struct {
-	Scope        string   `json:"scope"`
-	TargetType   string   `json:"target_type,omitempty"`
-	UserOpenIDs  []string `json:"user_openids,omitempty"`  // c2c + specific
-	GroupOpenIDs []string `json:"group_openids,omitempty"` // group + specific
-	Panel        Panel    `json:"panel"`
-}
+// PanelReq 是创建指令面板的请求。
+type PanelReq = dto.PanelReq
 
 // Panel 是面板配置（元素最多 20 个）。
-type Panel struct {
-	Items  []PanelItem `json:"items,omitempty"`
-	Remark string      `json:"remark,omitempty"` // 开发者备注，不对用户展示
-}
+type Panel = dto.Panel
 
-// PanelItem 是面板元素。Type：command（点击把 name 填入输入框）/ link。
-// Name 最多 14 字符，Desc 最多 30 字符。
-type PanelItem struct {
-	Name      string `json:"name,omitempty"`
-	Desc      string `json:"desc,omitempty"`
-	Type      string `json:"type,omitempty"`
-	OnlyAdmin bool   `json:"only_admin,omitempty"`
-	Link      string `json:"link,omitempty"` // 仅 link：点击在浏览器打开
-}
+// PanelItem 是面板元素。
+type PanelItem = dto.PanelItem
 
-// PanelEntry 是面板列表查询结果（GET /v2/panels 的 records 元素）。
-type PanelEntry struct {
-	PanelID    string `json:"panel_id"`
-	Scope      string `json:"scope"`
-	TargetType string `json:"target_type"`
-	Panel      Panel  `json:"panel"`
-}
+// PanelEntry 是面板列表查询结果。
+type PanelEntry = dto.PanelEntry
 
-// --- API 调用 ---
-
-// qqAPI 调一个 QQ OpenAPI 端点（JSON in/out，QQBot 鉴权）。状态码 >=400 返回错误。
-func (b *Bot) qqAPI(ctx context.Context, method, path string, payload any) ([]byte, error) {
-	if b.tokenSource == nil {
-		return nil, ErrNotConnected
-	}
-	tok, err := b.tokenSource.Token()
-	if err != nil {
-		return nil, fmt.Errorf("取 token 失败: %w", err)
-	}
-	var rdr io.Reader
-	if payload != nil {
-		data, err := json.Marshal(payload)
-		if err != nil {
-			return nil, err
-		}
-		rdr = bytes.NewReader(data)
-	}
-	req, err := http.NewRequestWithContext(ctx, method, qqAPIBase+path, rdr)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Authorization", "QQBot "+tok.AccessToken)
-	req.Header.Set("X-Union-Appid", b.appID)
-	if payload != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("请求失败: %w", err)
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, truncateStr(string(body), 300))
-	}
-	return body, nil
-}
-
-// menuReq 是 /v2/menu 的请求/响应外层：配置包在 menu 字段里（真机验证：直接发
-// {"items":[...]} 会报 40030016 必填字段缺失）。
-type menuReq struct {
-	Menu    Menu `json:"menu"`
-	Version int  `json:"version,omitempty"`
-}
+// --- API 调用（委托 pkg/botgo）---
 
 // SetMenu 覆盖式设置全局自定义菜单，返回新版本号。
 func (b *Bot) SetMenu(ctx context.Context, m Menu) (int, error) {
-	body, err := b.qqAPI(ctx, http.MethodPut, "/v2/menu", menuReq{Menu: m})
+	api, err := b.openapi()
 	if err != nil {
 		return 0, err
 	}
-	return int(gjson.GetBytes(body, "version").Int()), nil
+	return api.SetMenu(ctx, m)
 }
 
 // GetMenu 查询当前全局自定义菜单。
 func (b *Bot) GetMenu(ctx context.Context) (Menu, error) {
-	body, err := b.qqAPI(ctx, http.MethodGet, "/v2/menu", nil)
+	api, err := b.openapi()
 	if err != nil {
 		return Menu{}, err
 	}
-	var req menuReq
-	if err := json.Unmarshal(body, &req); err != nil {
+	m, err := api.GetMenu(ctx)
+	if err != nil {
 		return Menu{}, err
 	}
-	return req.Menu, nil
+	return *m, nil
 }
 
 // CreatePanel 创建指令面板，返回 panel_id。
 func (b *Bot) CreatePanel(ctx context.Context, p PanelReq) (string, error) {
-	body, err := b.qqAPI(ctx, http.MethodPost, "/v2/panels", p)
+	api, err := b.openapi()
 	if err != nil {
 		return "", err
 	}
-	id := gjson.GetBytes(body, "panel_id").String()
-	if id == "" {
-		return "", fmt.Errorf("响应缺少 panel_id: %s", truncateStr(string(body), 300))
-	}
-	return id, nil
+	return api.CreatePanel(ctx, p)
 }
 
 // ListPanels 查询某场景的面板列表（自动翻页）。
 func (b *Bot) ListPanels(ctx context.Context, scope string) ([]PanelEntry, error) {
-	var out []PanelEntry
-	cursor := ""
-	for {
-		path := "/v2/panels?scope=" + scope + "&limit=50"
-		if cursor != "" {
-			path += "&cursor=" + cursor
-		}
-		body, err := b.qqAPI(ctx, http.MethodGet, path, nil)
-		if err != nil {
-			return nil, err
-		}
-		var page struct {
-			Records    []PanelEntry `json:"records"`
-			NextCursor string       `json:"next_cursor"`
-			IsEnd      bool         `json:"is_end"`
-		}
-		if err := json.Unmarshal(body, &page); err != nil {
-			return nil, err
-		}
-		out = append(out, page.Records...)
-		if page.IsEnd || page.NextCursor == "" || len(page.Records) == 0 {
-			return out, nil
-		}
-		cursor = page.NextCursor
+	api, err := b.openapi()
+	if err != nil {
+		return nil, err
 	}
+	return api.ListPanels(ctx, scope)
 }
 
 // DeletePanel 删除一个指令面板。
 func (b *Bot) DeletePanel(ctx context.Context, panelID string) error {
-	_, err := b.qqAPI(ctx, http.MethodDelete, "/v2/panels/"+panelID, nil)
-	return err
+	api, err := b.openapi()
+	if err != nil {
+		return err
+	}
+	return api.DeletePanel(ctx, panelID)
 }
 
 // --- 配置与发布编排 ---
@@ -273,61 +161,6 @@ func (b *Bot) AutoMenuConfig() MenuConfig {
 		cfg.Panels = append(cfg.Panels, PanelReq{Scope: "group", TargetType: "all", Panel: panel})
 	}
 	return cfg
-}
-
-// CommandKeyboard 按当前已注册命令自动生成聊天内的命令按钮键盘，挂在 .帮助/.菜单
-// 的回复上（文字 + 按钮一条消息）。与 AutoMenuConfig 同一套过滤：非隐藏、未
-// HideBotMenu/RequireAtOrPrefix、非 OwnerOnly/AdminOnly。每行 4 个、上限 24 个；
-// 有 Usage（需要补参数，如 .点歌 歌名）的命令点击仅把命令填入输入框（enter=false，
-// 补完参数再发送），无参命令点击直接发送（enter=true）。
-func (b *Bot) CommandKeyboard() *keyboard.MessageKeyboard {
-	b.mu.RLock()
-	defer b.mu.RUnlock()
-	pref := ""
-	if len(b.prefixes) > 0 {
-		pref = b.prefixes[0]
-	}
-	const perRow, maxBtns = 4, 24
-	var rows []*keyboard.Row
-	var row *keyboard.Row
-	n := 0
-	for _, c := range b.cmds {
-		if c.hidden || c.hideBotMenu || c.requireAt || c.ownerOnly || c.adminOnly {
-			continue
-		}
-		if n >= maxBtns {
-			break
-		}
-		n++
-		if row == nil || len(row.Buttons) >= perRow {
-			row = &keyboard.Row{}
-			rows = append(rows, row)
-		}
-		row.Buttons = append(row.Buttons, &keyboard.Button{
-			ID:         c.name,
-			RenderData: &keyboard.RenderData{Label: truncateStr(c.name, 12), Style: 1},
-			Action: &keyboard.Action{
-				Type:       keyboard.ActionTypeAtBot,
-				Permission: &keyboard.Permission{Type: keyboard.PermissionTypAll},
-				Data:       pref + c.name,
-				Enter:      c.usage == "",
-			},
-		})
-	}
-	return &keyboard.MessageKeyboard{
-		Content: &keyboard.CustomKeyboard{Rows: rows, Style: &keyboard.KeyboardStyle{FontSize: "small"}},
-	}
-}
-
-// MarshalKeyboard 序列化按钮键盘为可直接传给 Ctx.ReplyMarkdownKeyboard 的 JSON：
-// botgo 的 Action.SubscribeData 是值类型（无 omitempty），会输出空对象
-// "subscribe_data":{}，type=2 按钮带它可能被 QQ 参数校验拒掉，这里剥除。
-func MarshalKeyboard(kb *keyboard.MessageKeyboard) (string, error) {
-	raw, err := json.Marshal(kb)
-	if err != nil {
-		return "", err
-	}
-	return strings.ReplaceAll(string(raw), `,"subscribe_data":{}`, ""), nil
 }
 
 // LoadMenuConfig 从 JSON 文件加载发布配置；文件不存在返回 (nil, nil)（用内置默认）。

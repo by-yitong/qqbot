@@ -23,7 +23,8 @@ func NewPing() *Ping { return &Ping{} }
 func (p *Ping) Install(b *bot.Bot) {
 	b.Command("ping", p.run).
 		Desc("测试机器人是否在线；ping <域名/IP> 做真实 ping").
-		Alias("p", "pong")
+		Alias("p", "pong").
+		Category(bot.CatGeneral)
 }
 
 // pingAllow 与 http_get / 站长工具共用的内网放行名单（AGENT_HTTP_ALLOW）。

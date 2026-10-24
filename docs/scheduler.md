@@ -19,9 +19,9 @@
 - 执行保护：每任务同时最多一个实例（重叠跳过）、panic 恢复、15 分钟超时；失败记入 `LastError`（`/task` 列表可见，下个周期自然再试）。
 - 数量上限：单聊天 `TASK_MAX_PER_CHAT`（默认10）/ 全局 `TASK_MAX_TOTAL`（默认100），插件声明的任务不计。
 
-管理命令：`/task`（列表）｜`/task del <id>`｜`/task on|off <id>`｜`/task run <id>`（立即试跑，不影响原计划）。创建不需要命令，直接跟 bot 说即可；agent 侧也可 `list_tasks` / `delete_task` / `toggle_task`。
+管理命令：`/task`（列表，每个任务行尾带「试跑/停用启用/删除」内嵌指令标签，点击填入对应命令不用手打 ID）｜`/task del <id>`｜`/task on|off <id>`｜`/task run <id>`（立即试跑，不影响原计划）。创建不需要命令，直接跟 bot 说即可；agent 侧也可 `list_tasks` / `delete_task` / `toggle_task`。
 
-**平台限制**：定时发送只能走主动消息。频道随时可发；**群/私聊主动消息需在 q.qq.com 开通且受官方额度频控**，未开通时发送会失败并记入 LastError。
+**平台限制**：定时发送只能走主动消息。频道随时可发；群/私聊主动消息需在 q.qq.com 开通（**本机器人已开通**）且受官方额度频控，失败会记入 LastError。
 
 ## 插件侧使用（Happy 每日笑话示范，`HAPPY_DAILY_TARGET` 指定目标后启用）
 

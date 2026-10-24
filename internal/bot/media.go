@@ -1,34 +1,22 @@
 package bot
 
 import (
-	"bytes"
 	"context"
-	"crypto/md5"
-	"crypto/sha1"
-	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"path"
-	"strconv"
 	"strings"
 	"time"
 
-	"github.com/tencent-connect/botgo/dto"
-	"github.com/tidwall/gjson"
-	"golang.org/x/oauth2"
+	"qqbot/pkg/botgo/dto"
 
 	"qqbot/internal/audio"
 )
 
 // ErrChannelImageUnsupported 频道发图 v1 不支持（仅群/私聊）。
 var ErrChannelImageUnsupported = fmt.Errorf("频道发图暂不支持（仅群/私聊）")
-
-// 腾讯富媒体上传端点（公域）。botgo v0.2.1 未封装上传，这里自行 POST。
-// 用 var 便于测试覆盖。
-var qqAPIBase = "https://api.sgroup.qq.com"
 
 // richMediaMsg 是 MsgType=7 富媒体发送消息（自定义结构，实现 dto.APIMessage）。
 // 不用 dto.MessageToCreate：其 Media.FileInfo 是 []byte，json.Marshal 会再 base64 编码一次，
@@ -54,12 +42,22 @@ func (m richMediaMsg) GetSendType() dto.SendType { return dto.Text }
 
 // sendRichMedia 上传并发送一条富媒体消息（MsgType=7）的公共路径。
 // group=true 走群、false 走 C2C；fileType: 1图片/2视频/3语音/4文件。
+// 上传协议（URL 模式，POST /v2/{groups|users}/{openid}/files）在 pkg/botgo。
 func (b *Bot) sendRichMedia(ctx context.Context, group bool, openID, msgAnchor string, fileType int, fileURL string) (string, error) {
-	fileInfo, err := b.uploadRichMedia(ctx, group, openID, fileType, fileURL)
+	api, err := b.openapi()
 	if err != nil {
 		return "", err
 	}
-	return b.postRichMediaMsg(ctx, group, openID, msgAnchor, fileInfo)
+	var f *dto.RichMediaFile
+	if group {
+		f, err = api.UploadGroupRichMedia(ctx, openID, fileType, fileURL)
+	} else {
+		f, err = api.UploadUserRichMedia(ctx, openID, fileType, fileURL)
+	}
+	if err != nil {
+		return "", err
+	}
+	return b.postRichMediaMsg(ctx, group, openID, msgAnchor, f.FileInfo)
 }
 
 // postRichMediaMsg 用 file_info 发一条 MsgType=7 富媒体消息。
@@ -188,176 +186,31 @@ func (b *Bot) SendC2CMediaBytes(ctx context.Context, userID, msgAnchor string, f
 }
 
 // sendMediaBytes 分片上传本地字节并按 MsgType=7 发送。
+// 分片直传协议（官方 chunked-upload 流程）在 pkg/botgo。
 func (b *Bot) sendMediaBytes(ctx context.Context, group bool, openID, msgAnchor string, fileType int, filename string, data []byte) (string, error) {
-	fileInfo, err := b.uploadFileChunked(ctx, group, openID, fileType, filename, data)
+	api, err := b.openapi()
 	if err != nil {
 		return "", err
 	}
-	return b.postRichMediaMsg(ctx, group, openID, msgAnchor, fileInfo)
+	var f *dto.RichMediaFile
+	if group {
+		f, err = api.UploadGroupFileChunked(ctx, openID, fileType, filename, data)
+	} else {
+		f, err = api.UploadUserFileChunked(ctx, openID, fileType, filename, data)
+	}
+	if err != nil {
+		return "", err
+	}
+	return b.postRichMediaMsg(ctx, group, openID, msgAnchor, f.FileInfo)
 }
 
-// --- 分片上传（官方 chunked-upload 流程） ---
+// --- 下载与语音转码（服务端代下载 / mp3/wav → silk，项目侧编排）---
 
 // maxFileBytes 通用文件官方硬限 200MB（服务端代下载的上限）。
 const maxFileBytes = 200 << 20
 
-// md5PrefixLen upload_prepare 要求的 md5_10m：文件前 10002432 字节（约 10MB）的 MD5。
-const md5PrefixLen = 10002432
-
 // fileHTTP 代下载文件的客户端（200MB 大文件不能沿用语音的 60s 超时）。
 var fileHTTP = &http.Client{Timeout: 10 * time.Minute}
-
-// chunkHTTP 分片 PUT 预签名地址的客户端（单片可能 10MB 级）。
-var chunkHTTP = &http.Client{Timeout: 10 * time.Minute}
-
-// uploadFileChunked 官方分片上传流程：upload_prepare（带 md5/sha1/md5_10m 校验值）
-// → 按 parts 的预签名地址逐片 PUT → upload_part_finish 通知 → /files 传 upload_id
-// 合并拿 file_info。适用于本地字节直传（通用文件唯一可用路径，也可兜底媒体）。
-func (b *Bot) uploadFileChunked(ctx context.Context, group bool, openID string, fileType int, filename string, data []byte) (string, error) {
-	if b.tokenSource == nil {
-		return "", ErrNotConnected
-	}
-	tok, err := b.tokenSource.Token()
-	if err != nil {
-		return "", fmt.Errorf("取 token 失败: %w", err)
-	}
-	if filename == "" {
-		filename = "file.bin"
-	}
-
-	// 校验值：全量 md5/sha1 + 前 ~10MB 的 md5。
-	md5Full := md5.Sum(data)
-	sha1Full := sha1.Sum(data)
-	prefix := data
-	if len(prefix) > md5PrefixLen {
-		prefix = prefix[:md5PrefixLen]
-	}
-	md5Head := md5.Sum(prefix)
-
-	scope := "groups"
-	if !group {
-		scope = "users"
-	}
-
-	// 1. 申请上传任务，拿分片列表。
-	prepPayload, _ := json.Marshal(map[string]any{
-		"file_type": fileType,
-		"file_name": filename,
-		"file_size": strconv.Itoa(len(data)),
-		"md5":       hex.EncodeToString(md5Full[:]),
-		"sha1":      hex.EncodeToString(sha1Full[:]),
-		"md5_10m":   hex.EncodeToString(md5Head[:]),
-	})
-	prepBody, err := b.qqPOST(ctx, tok, fmt.Sprintf("%s/v2/%s/%s/upload_prepare", qqAPIBase, scope, openID), prepPayload)
-	if err != nil {
-		return "", fmt.Errorf("upload_prepare 失败: %w", err)
-	}
-	uploadID := gjson.GetBytes(prepBody, "upload_id").String()
-	if uploadID == "" {
-		return "", fmt.Errorf("upload_prepare 响应缺少 upload_id: %s", truncateStr(string(prepBody), 300))
-	}
-
-	// 2+3. 顺序 PUT 每个分片并通知完成（upload_config.concurrency 默认 1）。
-	parts := gjson.GetBytes(prepBody, "parts").Array()
-	if len(parts) == 0 {
-		return "", fmt.Errorf("upload_prepare 未返回分片: %s", truncateStr(string(prepBody), 300))
-	}
-	offset := 0
-	for _, p := range parts {
-		presigned := p.Get("presigned_url").String()
-		size := int(p.Get("block_size").Int())
-		if presigned == "" || size <= 0 {
-			return "", fmt.Errorf("分片信息异常: index=%d", p.Get("index").Int())
-		}
-		end := offset + size
-		if end > len(data) {
-			end = len(data)
-		}
-		part := data[offset:end]
-		if len(part) == 0 {
-			return "", fmt.Errorf("分片 %d 越界（offset=%d size=%d 总长=%d）", p.Get("index").Int(), offset, size, len(data))
-		}
-		if err := putChunk(ctx, presigned, part); err != nil {
-			return "", fmt.Errorf("分片 %d 上传失败: %w", p.Get("index").Int(), err)
-		}
-		finPayload, _ := json.Marshal(map[string]any{
-			"upload_id":  uploadID,
-			"part_index": p.Get("index").Int(),
-			"block_size": strconv.Itoa(len(part)),
-			"md5":        fmt.Sprintf("%x", md5.Sum(part)),
-		})
-		endpoint := fmt.Sprintf("%s/v2/%s/%s/upload_part_finish", qqAPIBase, scope, openID)
-		if _, err := b.qqPOST(ctx, tok, endpoint, finPayload); err != nil {
-			return "", fmt.Errorf("分片 %d 完成通知失败: %w", p.Get("index").Int(), err)
-		}
-		offset = end
-	}
-	if offset != len(data) {
-		return "", fmt.Errorf("分片总大小 %d 与文件 %d 不符", offset, len(data))
-	}
-
-	// 4. 合并拿 file_info（upload_id 模式，url 可空）。
-	mergePayload, _ := json.Marshal(map[string]any{
-		"file_type":    fileType,
-		"srv_send_msg": false,
-		"file_name":    filename,
-		"upload_id":    uploadID,
-	})
-	mergeBody, err := b.qqPOST(ctx, tok, fmt.Sprintf("%s/v2/%s/%s/files", qqAPIBase, scope, openID), mergePayload)
-	if err != nil {
-		return "", fmt.Errorf("分片合并失败: %w", err)
-	}
-	fileInfo := gjson.GetBytes(mergeBody, "file_info").String()
-	if fileInfo == "" {
-		if fu := gjson.GetBytes(mergeBody, "file_uuid").String(); fu != "" {
-			fileInfo = fu
-		}
-	}
-	if fileInfo == "" {
-		return "", fmt.Errorf("合并响应缺少 file_info: %s", truncateStr(string(mergeBody), 300))
-	}
-	return fileInfo, nil
-}
-
-// putChunk PUT 一个分片到预签名地址（无鉴权头，地址自带签名）。
-func putChunk(ctx context.Context, presignedURL string, part []byte) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPut, presignedURL, bytes.NewReader(part))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/octet-stream")
-	resp, err := chunkHTTP.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-	if resp.StatusCode >= 400 {
-		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, truncateStr(string(respBody), 200))
-	}
-	return nil
-}
-
-// qqPOST 带 QQBot 鉴权头 POST JSON 到腾讯接口，返回响应体（HTTP >= 400 报错）。
-func (b *Bot) qqPOST(ctx context.Context, tok *oauth2.Token, endpoint string, payload []byte) ([]byte, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(payload))
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Authorization", "QQBot "+tok.AccessToken)
-	req.Header.Set("X-Union-Appid", b.appID)
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, truncateStr(string(body), 300))
-	}
-	return body, nil
-}
 
 // fetchFile 代下载公网 URL 的文件（上限 200MB），返回字节与文件名（URL 路径末段）。
 func fetchFile(ctx context.Context, rawURL string) ([]byte, string, error) {
@@ -372,65 +225,6 @@ func fetchFile(ctx context.Context, rawURL string) ([]byte, string, error) {
 		}
 	}
 	return data, name, nil
-}
-
-// uploadRichMedia 按 URL 模式上传富媒体到群或 C2C，返回 file_info（用于 MsgType=7 发送）。
-// fileType: 1图片(png/jpg,软限20MB)/2视频(mp4,30MB)/3语音(silk,20MB)/4文件(200MB)。
-// imageURL 须公网可达（QQ 自行下载）。
-//
-// 为什么是 URL 模式：简单 multipart 直传（file/file_data 字段）已废——QQ 报 850026
-// 「富媒体文件下载失败」。官方 /files 只支持 URL 模式（给 url，QQ 下载）和分片上传。
-// 故图床提供一个公网 URL，本函数按 URL 模式交给 QQ 下载。
-func (b *Bot) uploadRichMedia(ctx context.Context, group bool, openID string, fileType int, imageURL string) (string, error) {
-	if b.tokenSource == nil {
-		return "", ErrNotConnected
-	}
-	tok, err := b.tokenSource.Token()
-	if err != nil {
-		return "", fmt.Errorf("取 token 失败: %w", err)
-	}
-	endpoint := qqAPIBase + "/v2/groups/" + openID + "/files"
-	if !group {
-		endpoint = qqAPIBase + "/v2/users/" + openID + "/files"
-	}
-
-	payload, err := json.Marshal(map[string]any{
-		"file_type":    fileType,
-		"url":          imageURL,
-		"srv_send_msg": false,
-	})
-	if err != nil {
-		return "", err
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(payload))
-	if err != nil {
-		return "", err
-	}
-	req.Header.Set("Authorization", "QQBot "+tok.AccessToken)
-	req.Header.Set("X-Union-Appid", b.appID)
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("上传失败: %w", err)
-	}
-	defer resp.Body.Close()
-	respBody, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode >= 400 {
-		return "", fmt.Errorf("上传 HTTP %d: %s", resp.StatusCode, truncateStr(string(respBody), 300))
-	}
-	// 腾讯返回 {file_uuid, file_info, ttl}；file_info 是喂回 MsgType=7 的不透明串。
-	fileInfo := gjson.GetBytes(respBody, "file_info").String()
-	if fileInfo == "" {
-		// 兜底：有些实现只返回 file_uuid，用它当 file_info 试。
-		if fu := gjson.GetBytes(respBody, "file_uuid").String(); fu != "" {
-			fileInfo = fu
-		}
-	}
-	if fileInfo == "" {
-		return "", fmt.Errorf("上传响应缺少 file_info: %s", truncateStr(string(respBody), 300))
-	}
-	return fileInfo, nil
 }
 
 // 语音转码相关：下载源音频的客户端与大小上限（防超大文件拖垮内存）。

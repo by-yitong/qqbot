@@ -36,10 +36,11 @@ func NewMute(groups []string) *Mute {
 	return &Mute{Groups: groups, Timeout: 10 * time.Second}
 }
 
-// NewMuteFromEnv 读 MUTE_* 变量构造群禁言插件；MUTE_ENABLE=1 才启用，否则返回 nil。
-// 命令仅主人可用（BOT_OWNERS，用 /id 查自己的 openid）；MUTE_GROUPS 限定群（空 = 所有群）。
+// NewMuteFromEnv 读 MUTE_* 变量构造群禁言插件；默认启用（谁能用已有 OwnerOnly 把关），
+// MUTE_ENABLE=0 显式关闭。命令仅主人可用（BOT_OWNERS，用 /id 查自己的 openid）；
+// MUTE_GROUPS 限定群（空 = 所有群）。
 func NewMuteFromEnv() bot.Plugin {
-	if utils.EnvInt("MUTE_ENABLE", 0) != 1 {
+	if utils.EnvInt("MUTE_ENABLE", 1) == 0 {
 		return nil
 	}
 	log.Println("[mute] 已启用群成员禁言（/禁言 /解禁；仅主人可用；机器人需是群管理员，只能禁言普通成员）")
@@ -56,10 +57,10 @@ func (p *Mute) Install(b *bot.Bot) {
 	b.Command("禁言", p.cmdMute).Alias("mute").
 		Desc("禁言 @某人 指定时长（如 10分钟 / 2小时 / 1天，最长 30 天）").
 		Usage("/禁言 @某人 10分钟").
-		GroupOnly().OwnerOnly().RequireAtOrPrefix()
+		GroupOnly().OwnerOnly().RequireAtOrPrefix().Category(bot.CatGroup)
 	b.Command("解禁", p.cmdUnmute).Alias("unmute").
 		Desc("解除 @某人 的禁言").Usage("/解禁 @某人").
-		GroupOnly().OwnerOnly().RequireAtOrPrefix()
+		GroupOnly().OwnerOnly().RequireAtOrPrefix().Category(bot.CatGroup)
 }
 
 // cmdMute /禁言：目标 = 消息里 @ 的人（可多个，一次最多 10 人），时长 = 第一个参数。

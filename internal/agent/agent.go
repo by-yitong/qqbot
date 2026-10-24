@@ -24,6 +24,7 @@ type Config struct {
 	LoopTimeout         time.Duration // 单次 Run 的总时长上限，默认 240s（守住 5min 被动回复窗口）
 	CompactionThreshold int           // token 估算阈值，>0 才启用压缩，默认 0(关)
 	KeepRecent          int           // 压缩时保留的近期消息条数，默认 10
+	SessionTTL          time.Duration // 会话时间衰减：Run 载入历史时剔除早于 now-TTL 的消息（旧上下文不占 token；长期记忆可查）。0 = 关闭
 	Skills              []Skill       // 注入 system 的技能（SKILL.md）
 	SkillsDir           string        // 技能落盘目录（skill_create 写到这里，空 = 创建的技能不持久化）
 	RuntimeMCPCfg       string        // 运行时添加的 MCP server 持久化文件（空 = 不持久化）
@@ -100,16 +101,23 @@ func (a *Agent) Run(ctx context.Context, userID, userText string, opts ...RunOpt
 		sess.Lock()
 		defer sess.Unlock()
 		msgs = append(msgs, sess.history...)
+		// 时间衰减：很久没聊的旧历史不再带入上下文（群冷场几天后有人 @ 时，
+		// 几天前的对话对新问题多半是噪声；真需要旧事模型会走 search_history）。
+		// 只裁本地副本，persist 时自然写回瘦身后的历史。
+		if a.cfg.SessionTTL > 0 {
+			msgs = TrimByAge(msgs, time.Now().Add(-a.cfg.SessionTTL))
+		}
 	}
 	// 补充块插在问题前、位于请求尾部，不破坏 system+历史 的前缀（上下文缓存）。
 	// 临时块（ctxBlock）发完即弃；持久块（persistBlk）是普通消息，随 session 落盘。
+	// 持久消息都打 Ts：下次 Run 的时间衰减靠它判断新旧。
 	if o.ctxBlock != "" {
 		msgs = append(msgs, newEphemeralUser(o.ctxBlock))
 	}
 	if o.persistBlk != "" {
-		msgs = append(msgs, NewUser(o.persistBlk))
+		msgs = append(msgs, stamped(NewUser(o.persistBlk)))
 	}
-	msgs = append(msgs, NewUserWithImages(userText, o.images))
+	msgs = append(msgs, stamped(NewUserWithImages(userText, o.images)))
 
 	var lastReply string
 	var overflowCompacted bool // 每次 Run 至多做一次溢出压缩+重试，防死循环
@@ -117,6 +125,9 @@ func (a *Agent) Run(ctx context.Context, userID, userText string, opts ...RunOpt
 	for {
 		// turn 边界：注入运行中补充的消息（steering）。用户主动补充重置迭代预算。
 		if steered := h.drainSteer(); len(steered) > 0 {
+			for i := range steered {
+				steered[i] = stamped(steered[i]) // 补充也会随历史落盘，进历史时打点
+			}
 			msgs = append(msgs, steered...)
 			iter = 0
 		}
@@ -182,11 +193,11 @@ func (a *Agent) Run(ctx context.Context, userID, userText string, opts ...RunOpt
 		}
 
 		// 记录 assistant 消息（含工具调用），再决定是否继续。
-		msgs = append(msgs, Message{
+		msgs = append(msgs, stamped(Message{
 			Role:      RoleAssistant,
 			Content:   result.Content,
 			ToolCalls: result.ToolCalls,
-		})
+		}))
 		if result.Content != "" {
 			lastReply = result.Content
 		}
@@ -207,12 +218,12 @@ func (a *Agent) Run(ctx context.Context, userID, userText string, opts ...RunOpt
 			if loopCtx.Err() == nil {
 				out = a.executeTool(loopCtx, tc)
 			}
-			msgs = append(msgs, Message{
+			msgs = append(msgs, stamped(Message{
 				Role:       RoleTool,
 				Content:    out,
 				ToolCallID: tc.ID,
 				Name:       tc.Name,
-			})
+			}))
 		}
 		if loopCtx.Err() != nil {
 			break // 工具批被打断：历史收尾后退出

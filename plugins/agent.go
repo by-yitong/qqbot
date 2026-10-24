@@ -37,6 +37,8 @@ type AgentPlugin struct {
 	steerAck     bool           // 补充消息入队成功后是否回一句轻确认
 	gapFile      string         // marker 持久化文件（空 = 仅内存，重启回退全量窗口）
 	imgHost      *imgstore.Host // 发图床（send_image 收到本地文件路径时经此转公网 URL）
+	hintDelay    time.Duration  // 长任务提示：Run 超过此时长发「任务进行中」（0=关）
+	hintRefresh  time.Duration  // 提示滚动换新间隔（撤回窗口 2 分钟，须小于它）
 
 	gapMu   sync.Mutex
 	lastGap map[string]time.Time // 群id → 上次注入覆盖到的最后一条消息时间
@@ -73,6 +75,18 @@ func WithImageHost(h *imgstore.Host) AgentOption {
 // WithSteerAck 设置补充消息入队成功后是否回一句轻确认（默认开）。
 func WithSteerAck(on bool) AgentOption {
 	return func(p *AgentPlugin) { p.steerAck = on }
+}
+
+// WithProgressHint 启用长任务提示：Run 超过 delay 仍未结束就回一条「任务进行中」，
+// 结束后撤回（官方撤回窗口 2 分钟，超过 refresh 间隔滚动换新，见 progresshint.go）。
+// delay<=0 关闭。
+func WithProgressHint(delay, refresh time.Duration) AgentOption {
+	return func(p *AgentPlugin) {
+		if delay > 0 {
+			p.hintDelay = delay
+			p.hintRefresh = refresh
+		}
+	}
 }
 
 // NewAgent 用配置好的 agent 构造插件（默认首次全量窗口 60 分钟 / 30 条，补充确认开）。
@@ -259,6 +273,9 @@ func (p *AgentPlugin) handle(c *bot.Ctx) {
 	}
 	// 当前聊天信息注入：create_task 等工具据此拿到定时任务的默认发送目标与创建者。
 	runCtx = scheduler.WithChatInfo(runCtx, chatInfoOf(c))
+	// 发起人身份注入（所有聊天来源）：selfdev 工具（AI 自开发插件，tools/selfdev.go）
+	// 的主人门禁依据；未注入时这些工具一律 fail-closed 拒绝。
+	runCtx = tools.WithRequester(runCtx, tools.Requester{UserID: c.UserID(), IsOwner: c.IsOwner()})
 	// 群聊发起人身份注入：群管工具（group_members / kick_group_member / group_blacklist）
 	// 的权限门禁依据（管理员直接操作；普通成员踢人须证据核实，见 tools/group.go）。
 	if c.IsGroup() {
@@ -270,7 +287,11 @@ func (p *AgentPlugin) handle(c *bot.Ctx) {
 		})
 	}
 
+	// 长任务提示：Run 超过阈值仍未结束先回一条「任务进行中」，结束时撤回
+	// （超 2 分钟撤回窗口则滚动换新；细节见 progresshint.go）。
+	finishHint := p.startProgressHint(c)
 	reply, err := p.ag.Run(runCtx, key, question, opts...)
+	finishHint()
 	if err != nil {
 		if errors.Is(err, agent.ErrInterrupted) {
 			return // 被用户主动停止：.stop 命令已回复「已停止」，这里静默
@@ -288,6 +309,31 @@ func (p *AgentPlugin) handle(c *bot.Ctx) {
 			p.recordReply(c, reply) // markdown 发不出（如语料审核拒绝）时回退纯文本
 		}
 	}
+}
+
+// startProgressHint 为本次 Run 启动「任务进行中」提示：提示用 c.ReplyText 发
+// （被动回复锚点，不占主动消息额度，且返回撤回要用的消息 id）；频道没有撤回接口，不提示。
+func (p *AgentPlugin) startProgressHint(c *bot.Ctx) func() {
+	if p.hintDelay <= 0 || c.IsChannel() {
+		return func() {}
+	}
+	h := &progressHint{
+		delay:   p.hintDelay,
+		refresh: p.hintRefresh,
+		send: func() (string, error) {
+			return c.ReplyText("⏳ 任务进行中，请稍候…")
+		},
+		recall: func(msgID string) error {
+			// 独立 ctx：Run 结束时 agent ctx 可能已被取消，撤回不应随之失效。
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			if c.IsGroup() {
+				return c.Bot.DeleteGroupMessage(ctx, c.GroupID(), msgID)
+			}
+			return c.Bot.DeleteC2CMessage(ctx, c.UserID(), msgID)
+		},
+	}
+	return h.start()
 }
 
 // mentionPrefix 群聊/频道回复开头带上 @发送人（群 <@openid>，频道 <@!id>）；

@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -55,6 +56,7 @@ func readBody(r *http.Request) string {
 }
 
 func (m *menuServer) handler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
 	switch {
 	case r.Method == http.MethodPut && r.URL.Path == "/v2/menu":
 		m.mu.Lock()
@@ -90,10 +92,7 @@ func withMenuServer(t *testing.T, fn func(m *menuServer, b *Bot)) {
 	m := &menuServer{}
 	srv := httptest.NewServer(http.HandlerFunc(m.handler))
 	t.Cleanup(srv.Close)
-	old := qqAPIBase
-	qqAPIBase = srv.URL
-	t.Cleanup(func() { qqAPIBase = old })
-	fn(m, &Bot{tokenSource: &fakeTS{tok: "tok"}, appID: "APP"})
+	fn(m, testBot(t, srv))
 }
 
 func TestApplyMenusLifecycle(t *testing.T) {
@@ -180,6 +179,7 @@ func TestMenuNotConnected(t *testing.T) {
 func TestListPanelsPagination(t *testing.T) {
 	page := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
 		page++
 		if page == 1 {
 			_, _ = w.Write([]byte(`{"records":[{"panel_id":"p1","scope":"group","panel":{"remark":"r"}}],"next_cursor":"c2","is_end":false}`))
@@ -191,11 +191,8 @@ func TestListPanelsPagination(t *testing.T) {
 		_, _ = w.Write([]byte(`{"records":[{"panel_id":"p2","scope":"group","panel":{}}],"next_cursor":"","is_end":true}`))
 	}))
 	t.Cleanup(srv.Close)
-	old := qqAPIBase
-	qqAPIBase = srv.URL
-	t.Cleanup(func() { qqAPIBase = old })
 
-	b := &Bot{tokenSource: &fakeTS{tok: "t"}, appID: "A"}
+	b := testBot(t, srv)
 	entries, err := b.ListPanels(context.Background(), "group")
 	if err != nil {
 		t.Fatalf("ListPanels: %v", err)
@@ -291,50 +288,79 @@ func TestAutoMenuConfig(t *testing.T) {
 	}
 }
 
-func TestCommandKeyboard(t *testing.T) {
-	b := &Bot{cmdIndex: map[string]*Command{}, prefixes: []string{"."}}
+func TestHelpCategories(t *testing.T) {
+	b := &Bot{cmdIndex: map[string]*Command{}}
 	nop := func(*Ctx) {}
-	b.Command("ping", nop).Desc("在线检测")     // 无 usage → 点击直接发送
-	b.Command("点歌", nop).Usage("<歌名>")      // 有 usage → 点击仅填入输入框
-	b.Command("选", nop).RequireAtOrPrefix() // 排除：面板/按钮填入裸名不命中
-	b.Command("禁言", nop).AdminOnly()        // 排除：受限命令
-	b.Command("webhook", nop).OwnerOnly()   // 排除
-	b.Command("隐藏", nop).Hidden()           // 排除
-	for i := 0; i < 10; i++ {               // 凑满 12 个可见命令，验证 4/行分行与 24 上限不误伤
-		b.Command("命令"+strings.Repeat("x", i+1), nop)
+	b.Command("ping", nop).Category(CatGeneral)
+	b.Command("点歌", nop).Category(CatMusic)
+	b.Command("选", nop).Hidden().Category(CatMusic) // hidden 不进组
+	b.Command("whois", nop)                         // 未分类 → 归「通用」
+	b.Command("task", nop).Category(CatTask)
+	b.Command("再通用", nop).Category(CatGeneral) // 同名分组应合并，不再新开
+
+	plain := b.Help()
+	// 分组顺序 = 各分类首个命令的注册顺序；未分类的 whois 并入已开的通用组。
+	last := -1
+	for _, h := range []string{"【通用】", "【音乐】", "【定时任务】"} {
+		i := strings.Index(plain, h)
+		if i < 0 {
+			t.Fatalf("缺分组头 %q:\n%s", h, plain)
+		}
+		if i < last {
+			t.Errorf("分组顺序不对（%q 应在前）:\n%s", h, plain)
+		}
+		last = i
+	}
+	if strings.Count(plain, "【通用】") != 1 {
+		t.Errorf("同名分组应合并:\n%s", plain)
+	}
+	if strings.Contains(plain, "选") {
+		t.Errorf("hidden 命令不应出现:\n%s", plain)
+	}
+	if w, p := strings.Index(plain, "whois"), strings.Index(plain, "ping"); w < p {
+		t.Errorf("未分类命令应紧跟通用组已有命令:\n%s", plain)
 	}
 
-	kb := b.CommandKeyboard()
-	if len(kb.Content.Rows) != 3 { // 12 个可见命令 → 3 行
-		t.Fatalf("12 个命令应分 3 行, got %d", len(kb.Content.Rows))
+	md := b.HelpMarkdownFor(nil)
+	if !strings.Contains(md, "**【音乐】**") || !strings.Contains(md, CmdInputTag("点歌", "点歌")) {
+		t.Errorf("md 版分组头/组内标签缺失:\n%s", md)
 	}
-	for i, row := range kb.Content.Rows {
-		if len(row.Buttons) != 4 {
-			t.Errorf("第 %d 行应有 4 个按钮, got %d", i, len(row.Buttons))
-		}
+}
+
+func TestCmdInputTag(t *testing.T) {
+	tag := CmdInputTag("选 1", "1. 天下 - 张杰")
+	if !strings.HasPrefix(tag, `<qqbot-cmd-input text="`) || !strings.HasSuffix(tag, `" reference="false" />`) {
+		t.Errorf("标签格式不对: %s", tag)
 	}
-	ping, dianGe := kb.Content.Rows[0].Buttons[0], kb.Content.Rows[0].Buttons[1]
-	if ping.Action.Data != ".ping" || !ping.Action.Enter {
-		t.Errorf("无参命令应直接发送: %+v", ping.Action)
+	// 官方要求 text/show 传值 urlencode。
+	if !strings.Contains(tag, url.QueryEscape("选 1")) || !strings.Contains(tag, url.QueryEscape("1. 天下 - 张杰")) {
+		t.Errorf("text/show 应 urlencode: %s", tag)
 	}
-	if dianGe.Action.Data != ".点歌" || dianGe.Action.Enter {
-		t.Errorf("带参命令应仅填入输入框: %+v", dianGe.Action)
+	if got := CmdInputTag("帮助", ""); got != CmdInputTag("帮助", "帮助") {
+		t.Errorf("show 省略时应取 text: %s", got)
 	}
-	raw, err := MarshalKeyboard(kb)
-	if err != nil {
-		t.Fatal(err)
+}
+
+func TestHelpMarkdownFor(t *testing.T) {
+	b := &Bot{cmdIndex: map[string]*Command{}}
+	nop := func(*Ctx) {}
+	b.Command("ping", nop).Desc("在线检测")   // 无 usage → 标签 text 不带尾空格，点击填入即完整命令
+	b.Command("点歌", nop).Usage("<歌名>")    // 有 usage → text 尾补空格，用户接着敲歌名
+	b.Command("禁言", nop).AdminOnly()      // 排除：受限命令
+	b.Command("webhook", nop).OwnerOnly() // 排除
+	b.Command("隐藏", nop).Hidden()         // 排除
+
+	// 普通用户视角：AdminOnly/OwnerOnly 不出现（nil viewer 是不过滤的内部用法）。
+	md := b.HelpMarkdownFor(&Ctx{Bot: b})
+	if !strings.Contains(md, CmdInputTag("ping", "ping")) {
+		t.Errorf("无参命令的标签缺失: %s", md)
 	}
-	for _, want := range []string{`"data":".ping"`, `"data":".点歌"`, `"enter":true`} {
-		if !strings.Contains(raw, want) {
-			t.Errorf("键盘 JSON 缺 %q: %s", want, raw)
-		}
+	if !strings.Contains(md, CmdInputTag("点歌 ", "点歌")) {
+		t.Errorf("带参命令的标签 text 应尾补空格: %s", md)
 	}
-	if strings.Contains(raw, "subscribe_data") {
-		t.Errorf("键盘 JSON 应剥除空 subscribe_data: %s", raw)
-	}
-	for _, banned := range []string{"选", "禁言", "webhook", "隐藏"} {
-		if strings.Contains(raw, `"data":".`+banned+`"`) {
-			t.Errorf("受限/隐藏命令 %q 不应出现在按钮里", banned)
+	for _, banned := range []string{"禁言", "webhook", "隐藏"} {
+		if strings.Contains(md, banned) {
+			t.Errorf("受限/隐藏命令 %q 不应出现在标签版帮助里", banned)
 		}
 	}
 }

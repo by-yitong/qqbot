@@ -1,14 +1,14 @@
 # qqbot
 
-基于腾讯官方 [botgo](https://github.com/tencent-connect/botgo) SDK 的 QQ 机器人，自带一个轻量插件框架（命令 / 中间件 / 监听器 / 插件 / 会话状态），外加一个**轻量 agent harness**（工具循环 / 多轮记忆 / 上下文压缩 / 技能 / MCP）。
+基于腾讯官方 botgo SDK（**本地 fork 到 `pkg/botgo` 维护**，上游 v0.2.1 已停更，官方新接口直接补在 fork 里）的 QQ 机器人，自带一个轻量插件框架（命令 / 中间件 / 监听器 / 插件 / 会话状态），外加一个**轻量 agent harness**（工具循环 / 多轮记忆 / 上下文压缩 / 技能 / MCP）。
 
 - **官方机器人**：走 `q.qq.com` 注册的机器人（AppID + AppSecret），合规、稳定。
 - **WSS 出站**：机器人主动连接腾讯（内网/NAT 友好，无需公网 HTTPS）。
 - **插件框架** `internal/bot`：写功能只关心业务，handler 收一个 `*bot.Ctx`。
 - **agent harness** `internal/agent`：未命中命令的消息交给一个可调工具、有记忆、能压缩上下文的 agent（设计参考 [pi](https://github.com/earendil-works/pi) 的 coding-agent）。
-- 内置插件：`ping`（在线检测 / 真实 ping）/ `whois` / `echo` / `counter`（会话状态）/ `happy`（每日笑话）/ `agent`（AI 兜底）/ `video`（抖音/快手短视频解析）/ `music`（多音源点歌：5sing / QQ / 酷我 / 酷我高音质 / 汽水 / 网易，按钮选歌）/ `panel`（宝塔面板状态）/ 入群欢迎 / 入群审批 / 禁言 / 成员管理与黑名单 等更多。
+- 内置插件：`ping`（在线检测 / 真实 ping）/ `whois` / `echo` / `counter`（会话状态）/ `happy`（每日笑话）/ `agent`（AI 兜底）/ `video`（抖音/快手短视频解析）/ `music`（多音源点歌：5sing / QQ / 酷我 / 酷我高音质 / 汽水 / 网易，标签选歌）/ `panel`（宝塔面板状态）/ 入群欢迎 / 入群审批 / 禁言 / 成员管理与黑名单 等更多。帮助、歌单、音源、审批、任务、黑名单等列表类回复均带**官方内嵌指令标签**（点击填入输入框，见 docs/development.md）。
 
-> ⚠️ 官方机器人约束：**只能被动回复**（收到消息后 5 分钟内回复）、**用户/群 ID 是 openid（不是 QQ 号）**。主动推送（上线通知、入群欢迎、定时任务等）需在 q.qq.com 开通**主动消息**权限。群管接口官方正在逐步开放：2026-08 起新增**群成员入群事件、入群申请事件与审批、禁言接口**，2026-09 新增**成员列表/详情、批量移除（踢人）与群黑名单接口**（内邀白名单机制，未接入的机器人报 11253），见 [群管功能](docs/group.md)。
+> ⚠️ 官方机器人约束：被动回复需锚定消息（收到消息后 5 分钟内）、**用户/群 ID 是 openid（不是 QQ 号）**。本机器人已开通**主动消息**权限（上线通知、入群欢迎、定时任务、webhook 推送在用），原生 markdown（含内嵌按钮 keyboard）群/私聊实测可发（官方保留异步审核权，个别可能延迟）。群管接口官方正在逐步开放：2026-08 起新增**群成员入群事件、入群申请事件与审批、禁言接口**，2026-09 新增**成员列表/详情、批量移除（踢人）与群黑名单接口**（内邀白名单机制，未接入的机器人报 11253），见 [群管功能](docs/group.md)。
 >
 > 群消息：默认只收 @ 消息（`GROUP_AT_MESSAGE_CREATE`）；在 q.qq.com 开通**全量群消息**权限后可收 `GROUP_MESSAGE_CREATE`（无需 @，本框架已支持两者）。
 
@@ -20,11 +20,12 @@
 | [docs/agent.md](docs/agent.md) | Agent harness：工具循环 / 记忆（短期+长期）/ 压缩 / 技能 / MCP / 图床部署 / 内置工具 / 关键 env |
 | [docs/scheduler.md](docs/scheduler.md) | 定时任务：对话里让 AI 建任务 / 插件声明任务 |
 | [docs/group.md](docs/group.md) | 群管功能：入群欢迎 / 入群申请自动审批（AI 判答案）/ 群成员禁言 / 成员管理与黑名单 |
-| [docs/music.md](docs/music.md) | 点歌：6 音源（itapi）/ 按钮选歌 / 语音与文件发送 / 音源切换 |
+| [docs/music.md](docs/music.md) | 点歌：6 音源（itapi）/ 标签选歌 / 语音与文件发送 / 音源切换 |
+| [docs/zhihu.md](docs/zhihu.md) | 知乎 AI：热榜 / 搜回答 / 看问题（zhida-ai 模型，短期追问记忆） |
 
 ## 安装与运行
 
-依赖（`go.mod` 已含）：`github.com/tencent-connect/botgo`、`github.com/joho/godotenv`、`resty.dev/v3`、`github.com/tidwall/gjson`、`github.com/mark3labs/mcp-go`（MCP）、`gopkg.in/yaml.v3`（技能）。
+依赖（`go.mod` 已含）：`github.com/joho/godotenv`、`github.com/go-resty/resty`、`github.com/tidwall/gjson`、`github.com/mark3labs/mcp-go`（MCP）、`gopkg.in/yaml.v3`（技能）。QQ 官方协议封装在仓库内 `pkg/botgo`（botgo v0.2.1 的本地 fork）。
 
 ```bash
 cp .env.example .env          # 填入 QQBOT_APP_ID / QQBOT_APP_SECRET
@@ -36,7 +37,7 @@ go run .
 QQBOT_APP_ID=你的 AppID
 QQBOT_APP_SECRET=你的 AppSecret
 BOT_PREFIXES=/                # 命令前缀（可选，多个用 | 分隔）
-BOT_OWNERS=                   # 主人 openid（逗号分隔）：/webhook 等 OwnerOnly 命令仅主人可用
+BOT_OWNERS=                   # 主人 openid（逗号分隔）：/webhook 群地址、/踢 等 OwnerOnly 命令仅主人可用
 AI_API_KEY=                   # 配置则启用 agent 兜底（工具循环/多轮记忆/压缩/技能/MCP）
 ```
 
@@ -68,5 +69,5 @@ gofmt -l .
 ## 备注
 - WSS（出站）目前可用、内网友好；若腾讯日后弃用 WSS，需切 Webhook（要公网 HTTPS）。
 - ID 是 openid（每个应用不同），无法从 QQ 号推导；因此没有「按 QQ 号设超管」。
-- 富媒体：bot 支持**发图**（`send_image` 工具 / `ReplyImage`，群+私聊，走富媒体上传 MsgType=7）与**收图**（附件 URL 传入 agent）；原生 Markdown 群内受限（公域校验语料/异步审核，可能发不出或延迟）。频道发图 v1 不支持。
-- Webhook 推送：POST `/webhook/{group}/{sign}` 支持文本 / Markdown（`{"msg_type":"markdown","content":{"text":"..."}}`，原生 md，群内受官方语料校验/审核）/ 图片/视频/语音/通用文件——JSON `{"msg_type":"image|video|voice|file","content":{"url":"..."}}` 或 multipart 直传（`file` 字段）。图片/视频走 URL 模式（QQ 自行下载）；**通用文件官方不拉 URL**，服务端代下载（≤200MB）后走官方分片上传直推（multipart 字节直接分片，不经图床）。软限：图 20M / 视频 30M / 语音 20M / 文件 200M；经域名上传另受 nginx `client_max_body_size`（当前 50m）限制。
+- 富媒体：bot 支持**发图**（`send_image` 工具 / `ReplyImage`，群+私聊，走富媒体上传 MsgType=7）与**收图**（附件 URL 传入 agent）；原生 Markdown 群/私聊可发（含按钮 keyboard，实测正常；官方保留异步审核权，个别可能延迟）。频道发图 v1 不支持。
+- Webhook 推送：POST `/webhook/{openid}/{sign}`——openid 命中群则发群、命中用户则私聊发本人，支持文本 / Markdown（`{"msg_type":"markdown","content":{"text":"..."}}`，原生 md，实测可发）/ 图片/视频/语音/通用文件——JSON `{"msg_type":"image|video|voice|file","content":{"url":"..."}}` 或 multipart 直传（`file` 字段）。群地址：群内 `/webhook` 获取（没有则生成、已有沿用，`new` 重新生成），仅主人，地址走私聊发并带群名称；个人地址：私聊 `/webhook` 获取（任何用户，POST 内容私聊发回本人）。图片/视频走 URL 模式（QQ 自行下载）；**通用文件官方不拉 URL**，服务端代下载（≤200MB）后走官方分片上传直推（multipart 字节直接分片，不经图床）。软限：图 20M / 视频 30M / 语音 20M / 文件 200M；经域名上传另受 nginx `client_max_body_size`（当前 50m）限制。

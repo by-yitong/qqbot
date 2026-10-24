@@ -7,8 +7,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/tencent-connect/botgo/dto"
-	"github.com/tencent-connect/botgo/dto/keyboard"
+	"qqbot/pkg/botgo/dto"
+	"qqbot/pkg/botgo/dto/keyboard"
 )
 
 // ErrNotConnected 在尚未连接（api 未就绪）时由 ReplyText 返回。

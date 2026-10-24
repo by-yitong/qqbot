@@ -2,10 +2,10 @@ package plugins
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -219,35 +219,33 @@ func TestMusicKwLineRE(t *testing.T) {
 	}
 }
 
-func TestMusicSongKeyboard(t *testing.T) {
-	p := newTestMusic(t, "http://x")
-	entries := []musicEntry{}
-	for i := 1; i <= 6; i++ {
-		entries = append(entries, musicEntry{N: i, Title: fmt.Sprintf("歌曲标题很长很长很长%d", i), Singer: "歌手名也很长很长"})
+func TestMusicListText(t *testing.T) {
+	src := &musicSource{Key: "kuwo", Name: "酷我音乐"}
+	entries := []musicEntry{
+		{N: 1, Title: "天下", Singer: "张杰", Extra: "3:41"},
+		{N: 2, Title: "天下 (DJ Wave版)", Singer: "张杰&DJ Wave"},
 	}
-	kb := p.songKeyboard(entries)
-	if len(kb.Content.Rows) != 2 {
-		t.Fatalf("6 首应有 2 行, got %d", len(kb.Content.Rows))
+	// 标签版：每行一个 qqbot-cmd-input，text/show 均 urlencode。
+	tagged := musicListText(src, "天下", entries, true)
+	if got := strings.Count(tagged, "<qqbot-cmd-input"); got != 2 {
+		t.Fatalf("应每行 1 个标签共 2 个, got %d", got)
 	}
-	if len(kb.Content.Rows[0].Buttons) != 3 {
-		t.Fatalf("每行 3 个按钮, got %d", len(kb.Content.Rows[0].Buttons))
+	wantText := url.QueryEscape("选 1")
+	wantShow := url.QueryEscape("1. 天下 - 张杰 [3:41]")
+	if !strings.Contains(tagged, `text="`+wantText+`"`) || !strings.Contains(tagged, `show="`+wantShow+`"`) {
+		t.Errorf("标签参数不对:\n%s", tagged)
 	}
-	raw, err := json.Marshal(kb)
-	if err != nil {
-		t.Fatal(err)
+	if !strings.Contains(tagged, "点歌名标签选歌") {
+		t.Errorf("缺标签版提示: %s", tagged)
 	}
-	s := string(raw)
-	for _, want := range []string{`"data":"选 1"`, `"data":"选 6"`, `"label":"1 歌曲标题很长很…·歌手名也很…"`, `"enter":true`} {
-		if !strings.Contains(s, want) {
-			t.Errorf("按钮 JSON 缺 %q: %s", want, s)
-		}
+	// 纯文本版：无标签、有手动提示。
+	plain := musicListText(src, "天下", entries, false)
+	if strings.Contains(plain, "qqbot-cmd") {
+		t.Errorf("纯文本版不应含标签: %s", plain)
 	}
-	// 按钮文本要截断（QQ 按钮宽度有限）。
-	for _, row := range kb.Content.Rows {
-		for _, btn := range row.Buttons {
-			if l := len([]rune(btn.RenderData.Label)); l > 20 {
-				t.Errorf("按钮文字过长(%d): %s", l, btn.RenderData.Label)
-			}
+	for _, want := range []string{"1. 天下 - 张杰 [3:41]", "2. 天下 (DJ Wave版) - 张杰&DJ Wave", "发送「选 序号」"} {
+		if !strings.Contains(plain, want) {
+			t.Errorf("纯文本缺 %q: %s", want, plain)
 		}
 	}
 }

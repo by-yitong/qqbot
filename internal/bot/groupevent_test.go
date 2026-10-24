@@ -9,7 +9,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/tencent-connect/botgo/dto"
+	"qqbot/pkg/botgo/dto"
 )
 
 // 官方文档示例（截断）改写的事件 payload。
@@ -111,6 +111,7 @@ type joinSrv struct {
 }
 
 func (s *joinSrv) handler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.calls = append(s.calls, r.Method+" "+r.URL.Path)
@@ -138,10 +139,7 @@ func TestGroupJoinRequestAPIs(t *testing.T) {
 	s := &joinSrv{}
 	srv := httptest.NewServer(http.HandlerFunc(s.handler))
 	t.Cleanup(srv.Close)
-	old := qqAPIBase
-	qqAPIBase = srv.URL
-	t.Cleanup(func() { qqAPIBase = old })
-	b := &Bot{tokenSource: &fakeTS{tok: "tok"}, appID: "APP"}
+	b := testBot(t, srv)
 
 	// 审批：approve 带 join_request_id；decline 带理由
 	if err := b.ApproveGroupJoinRequest(context.Background(), "G1", "M9", "JR1", JoinReviewOpApprove, ""); err != nil {

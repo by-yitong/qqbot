@@ -60,6 +60,7 @@ type GroupAdminAPI interface {
 	RemoveGroupMembers(ctx context.Context, groupOpenID string, memberOpenIDs []string, addToBlacklist bool) (*bot.RemoveMembersResult, error)
 	ListGroupBlacklist(ctx context.Context, groupOpenID string) ([]bot.GroupBlacklistUser, error)
 	SetGroupBlacklist(ctx context.Context, groupOpenID, op string, memberOpenIDs []string) ([]string, error)
+	AvatarURLTemplate() string // 成员头像 URL 模板（{openid} 占位）；空 = 不提示
 }
 
 // EvidenceSearcher 是证据核实所需的记忆检索能力（*memory.Store 满足）。
@@ -145,7 +146,11 @@ func (t *GroupMembers) Execute(ctx context.Context, arguments string) (string, e
 	if len(lines) > 50 {
 		lines = append(lines[:50], fmt.Sprintf("…（其余 %d 人从略）", len(lines)-50))
 	}
-	return fmt.Sprintf("共 %d 人：\n%s", len(members), strings.Join(lines, "\n")), nil
+	out := fmt.Sprintf("共 %d 人：\n%s", len(members), strings.Join(lines, "\n"))
+	if tpl := t.API.AvatarURLTemplate(); tpl != "" {
+		out += "\n成员头像：" + tpl + "（{openid} 换成某人的 openid 即其头像直链）"
+	}
+	return out, nil
 }
 
 // --- kick_group_member：踢人（管理员直接；普通成员需证据核实）---

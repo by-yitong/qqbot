@@ -65,22 +65,22 @@ func (p *Member) Install(b *bot.Bot) {
 	b.Command("成员", p.cmdMembers).Alias("member").
 		Desc("群成员概览；@某人 看详情；带关键词搜昵称").
 		Usage("/成员 [@某人|关键词]").
-		GroupOnly().RequireAtOrPrefix()
+		GroupOnly().RequireAtOrPrefix().Category(bot.CatGroup)
 	b.Command("黑名单", p.cmdBlacklist).Alias("blacklist").
 		Desc("查看群黑名单列表").
-		GroupOnly().RequireAtOrPrefix()
+		GroupOnly().RequireAtOrPrefix().Category(bot.CatGroup)
 	b.Command("踢", p.cmdKick).Alias("kick").
 		Desc("移 @某人 出群（可加「拉黑」同时拉黑）").
 		Usage("/踢 @某人 [拉黑]").
-		GroupOnly().AdminOnly().RequireAtOrPrefix()
+		GroupOnly().AdminOnly().RequireAtOrPrefix().Category(bot.CatGroup)
 	b.Command("拉黑", p.cmdBlacklistAdd).
 		Desc("把 openid 加入群黑名单（仅限已不在群中的人；在群里的用 /踢 @某人 拉黑）").
 		Usage("/拉黑 openid [openid…]").
-		GroupOnly().AdminOnly().RequireAtOrPrefix()
+		GroupOnly().AdminOnly().RequireAtOrPrefix().Category(bot.CatGroup)
 	b.Command("解除拉黑", p.cmdBlacklistDel).Alias("unblacklist").
 		Desc("把 openid 移出群黑名单").
 		Usage("/解除拉黑 openid [openid…]").
-		GroupOnly().AdminOnly().RequireAtOrPrefix()
+		GroupOnly().AdminOnly().RequireAtOrPrefix().Category(bot.CatGroup)
 }
 
 // timeout 返回 API 超时（<=0 用默认 30s；成员列表要翻页，比单发命令宽一些）。
@@ -275,7 +275,8 @@ func (p *Member) cmdBlacklist(c *bot.Ctx) {
 	p.blacklistList(c.Bot, c)
 }
 
-// blacklistList 拉黑名单并回执（测试可注入假 memberAPI）。
+// blacklistList 拉黑名单并回执（测试可注入假 memberAPI）。带「解除」内嵌指令标签
+// 版：openid 手打不现实，点标签填入「解除拉黑 openid」是唯一实用路径。
 func (p *Member) blacklistList(ap memberAPI, c *bot.Ctx) {
 	ctx, cancel := context.WithTimeout(c.Context, p.timeout())
 	defer cancel()
@@ -284,7 +285,7 @@ func (p *Member) blacklistList(ap memberAPI, c *bot.Ctx) {
 		c.ReplyText("获取群黑名单失败：" + err.Error())
 		return
 	}
-	c.ReplyText(formatBlacklist(users))
+	c.ReplyTaggedOrPlain(formatBlacklist(users, true), formatBlacklist(users, false))
 }
 
 // --- 展示格式化 ---
@@ -417,8 +418,9 @@ func formatMemberDetail(m *bot.GroupMember) string {
 	return fmt.Sprintf("【%s】%s\n入群：%s\nopenid：%s", name, role, fmtMemberTime(m.JoinedAt), m.MemberOpenID)
 }
 
-// formatBlacklist 黑名单列表，最多展示 30 条。
-func formatBlacklist(users []bot.GroupBlacklistUser) string {
+// formatBlacklist 黑名单列表，最多展示 30 条。tagged=true 时每行尾带「解除」
+// 内嵌指令标签（点击填入「解除拉黑 openid」）；false 为纯文本。
+func formatBlacklist(users []bot.GroupBlacklistUser, tagged bool) string {
 	if len(users) == 0 {
 		return "群黑名单为空"
 	}
@@ -431,6 +433,9 @@ func formatBlacklist(users []bot.GroupBlacklistUser) string {
 	for _, u := range users[:limit] {
 		fmt.Fprintf(&sb, "\n%s 拉黑于 %s  %s",
 			memberDisplayName(u.Username, u.MemberOpenID), fmtMemberTime(u.BannedAt), u.MemberOpenID)
+		if tagged {
+			sb.WriteString(" " + bot.CmdInputTag("解除拉黑 "+u.MemberOpenID, "解除"))
+		}
 	}
 	if len(users) > limit {
 		fmt.Fprintf(&sb, "\n…（其余 %d 人从略）", len(users)-limit)

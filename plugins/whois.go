@@ -19,7 +19,8 @@ func NewWhois() *Whois { return &Whois{} }
 // Install 注册命令。
 func (p *Whois) Install(b *bot.Bot) {
 	b.Command("whois", p.run).
-		Desc("查询域名/IP 的 whois 注册信息（注册商、注册与到期时间、NS）")
+		Desc("查询域名/IP 的 whois 注册信息（注册商、注册与到期时间、NS）").
+		Category(bot.CatGeneral)
 }
 
 func (p *Whois) run(c *bot.Ctx) {

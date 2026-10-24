@@ -21,7 +21,7 @@ func NewZhiPu() *ZhiPu {
 func (p *ZhiPu) Install(b *bot.Bot) {
 	b.Command("zhipu", p.run).
 		Desc("查询智谱coding plan用量").
-		Usage("/zhipu").Alias("智谱用量")
+		Usage("/zhipu").Alias("智谱用量").Category(bot.CatAI)
 }
 
 func (p *ZhiPu) run(c *bot.Ctx) {

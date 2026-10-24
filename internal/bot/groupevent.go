@@ -14,8 +14,8 @@ package bot
 import (
 	"log"
 
-	"github.com/tencent-connect/botgo/dto"
-	"github.com/tencent-connect/botgo/event"
+	"qqbot/pkg/botgo/dto"
+	"qqbot/pkg/botgo/event"
 )
 
 // IntentGroupMemberEvent 是群成员事件（GROUP_MEMBER_ADD / GROUP_MEMBER_REMOVE）的 intent 位。
@@ -30,8 +30,9 @@ type GroupMemberAddEvent struct {
 	UserOpenID   string `json:"user_openid"`   // 新成员的用户 openid（跨应用统一标识，可能为空）
 }
 
-// GroupJoinRequestEvent 是 GROUP_JOIN_REQUEST 的事件体；结构与
-// ListGroupJoinRequests 返回的申请项一致（列表项缺 group_openid，事件里有）。
+// GroupJoinRequestEvent 是 GROUP_JOIN_REQUEST 的事件体；字段与 ListGroupJoinRequests
+// 返回的申请项（dto.GroupJoinRequest）一致，差异只有事件多带 group_openid。
+// 独立定义（不嵌入 dto）：字段扁平，事件构造处与 JSON 反序列化保持简单。
 type GroupJoinRequestEvent struct {
 	GroupOpenID   string                 `json:"group_openid"`
 	JoinRequestID string                 `json:"join_request_id"` // 审批接口回传用
@@ -47,23 +48,12 @@ type GroupJoinRequestEvent struct {
 	AutoApproved  *JoinAutoApproved      `json:"auto_approved"` // 官方自动审批策略已通过时携带
 }
 
-// JoinAutoApproved 是官方自动审批通过的扩展信息。
-type JoinAutoApproved struct {
-	StrategyID string `json:"strategy_id"`
-}
+// 入群验证相关类型（协议定义在 pkg/botgo/dto，这里别名保持旧引用兼容）。
+type JoinAutoApproved = dto.JoinAutoApproved
 
-// JoinRequestVerifyInfo 是入群验证信息。
-type JoinRequestVerifyInfo struct {
-	Method        string                `json:"method"` // verify_message 验证消息 / admin_review_qa 问答
-	VerifyMessage string                `json:"verify_message"`
-	ReviewQAList  []JoinRequestReviewQA `json:"review_qa_list"`
-}
+type JoinRequestVerifyInfo = dto.JoinRequestVerifyInfo
 
-// JoinRequestReviewQA 是一条入群问答（管理员设置的问题 + 申请人填的答案）。
-type JoinRequestReviewQA struct {
-	Question string `json:"question"`
-	Answer   string `json:"answer"`
-}
+type JoinRequestReviewQA = dto.JoinRequestReviewQA
 
 // Answers 返回申请人提交的全部验证答案（验证消息算一条；问答每题一条）。
 // 没有验证信息（如被邀请入群）返回 nil。

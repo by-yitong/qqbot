@@ -29,6 +29,10 @@ func (f *fakeGroupAPI) ListGroupMembers(_ context.Context, groupID string) ([]bo
 	return f.members, nil
 }
 
+func (f *fakeGroupAPI) AvatarURLTemplate() string {
+	return "https://q.qlogo.cn/qqapp/FAKE/{openid}/640"
+}
+
 func (f *fakeGroupAPI) GetGroupMember(_ context.Context, _, id string) (*bot.GroupMember, error) {
 	if f.targetErr != nil {
 		return nil, f.targetErr
@@ -99,6 +103,11 @@ func TestGroupMembersTool(t *testing.T) {
 	out, _ = tool.Execute(groupCtx("", false), `{"query":"阳光"}`)
 	if !strings.Contains(out, "阳光小助手") || strings.Contains(out, "管理员甲") {
 		t.Errorf("关键词过滤: %q", out)
+	}
+	// 尾部附头像 URL 模板提示（AI 可自行拼出任一成员头像直链）
+	out, _ = tool.Execute(groupCtx("", false), `{}`)
+	if !strings.Contains(out, "成员头像：https://q.qlogo.cn/qqapp/FAKE/{openid}/640") {
+		t.Errorf("应附头像模板提示: %q", out)
 	}
 }
 

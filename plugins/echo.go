@@ -14,7 +14,8 @@ func NewEcho() *Echo { return &Echo{} }
 func (p *Echo) Install(b *bot.Bot) {
 	b.Command("echo", p.run).
 		Desc("复读一句话").
-		Usage("/echo <文本>")
+		Usage("/echo <文本>").
+		Category(bot.CatGeneral)
 }
 
 func (p *Echo) run(c *bot.Ctx) {

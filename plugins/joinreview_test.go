@@ -3,8 +3,11 @@ package plugins
 import (
 	"context"
 	"errors"
+	"fmt"
+	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"qqbot/internal/agent"
 	"qqbot/internal/bot"
@@ -321,4 +324,244 @@ func TestReviewAIMode(t *testing.T) {
 			t.Error("精确命中应通过")
 		}
 	})
+}
+
+// fakeSender 记录提醒卡片发送调用的假 joinSender；err 非空时 md 发送失败（测纯文本兜底）。
+type fakeSender struct {
+	md   []string
+	text []string
+	err  error
+}
+
+func (f *fakeSender) SendGroupMarkdown(_ context.Context, _, _, md string) (string, error) {
+	if f.err != nil {
+		return "", f.err
+	}
+	f.md = append(f.md, md)
+	return "card1", nil
+}
+
+func (f *fakeSender) SendGroupText(_ context.Context, _, _, text string) (string, error) {
+	f.text = append(f.text, text)
+	return "card2", nil
+}
+
+func (f *fakeSender) AvatarURL(openid string) string {
+	return "https://q.qlogo.cn/qqapp/FAKE/" + openid + "/640"
+}
+
+// qaEvent 构造一条问答模式的入群申请事件。
+func qaEvent() bot.GroupJoinRequestEvent {
+	return bot.GroupJoinRequestEvent{
+		GroupOpenID: "G1", JoinRequestID: "JR1", MemberOpenID: "M1",
+		Username: "小明", ApplySource: "self_apply",
+		VerifyInfo: &bot.JoinRequestVerifyInfo{
+			Method:       "admin_review_qa",
+			ReviewQAList: []bot.JoinRequestReviewQA{{Question: "Go中如何声明变量？", Answer: "用let"}},
+		},
+	}
+}
+
+// TestReviewNotifyCard 提醒卡片推送时机：判定不通过/无法判定留人工时推，
+// 通过/自动拒绝不推；头像内嵌在 md 里（不单独发图）；卡片带指令标签与卡片码；
+// md 被审核拒发时降级纯文本（带文字命令）。
+func TestReviewNotifyCard(t *testing.T) {
+	t.Run("AI不通过留人工→推卡片带头像问答理由与标签", func(t *testing.T) {
+		fb := &fakeApprover{}
+		fs := &fakeSender{}
+		p := NewJoinReview(nil, JoinMatchAI, false, nil, nil).WithAI(
+			&fakeCompleter{content: `{"pass":false,"reason":"let是JS的关键字"}`}, "")
+		p.sender = fs
+		e := qaEvent()
+		p.review(fb, &e)
+		if fb.action != "" {
+			t.Errorf("action=%q, 应留人工", fb.action)
+		}
+		if len(fs.md) != 1 {
+			t.Fatalf("应推 1 张卡片，got %d", len(fs.md))
+		}
+		card := fs.md[0]
+		for _, want := range []string{"小明", "Go中如何声明变量？", "用let", "let是JS的关键字"} {
+			if !strings.Contains(card, want) {
+				t.Errorf("卡片缺 %q:\n%s", want, card)
+			}
+		}
+		// 头像内嵌 md 图片语法（qlogo 直链），不再单独发图
+		if !strings.Contains(card, "![avatar](https://q.qlogo.cn/qqapp/FAKE/M1/640)") {
+			t.Errorf("卡片应内嵌申请人头像:\n%s", card)
+		}
+		// 处理引导：指令标签（点击填入「审批 同意/拒绝 <卡片码>」；指令文本经 urlencode）
+		if !strings.Contains(card, "qqbot-cmd-input") ||
+			!strings.Contains(card, url.QueryEscape("审批 同意 ")) ||
+			!strings.Contains(card, url.QueryEscape("审批 拒绝 ")) {
+			t.Errorf("卡片应带同意/拒绝指令标签:\n%s", card)
+		}
+	})
+	t.Run("AI通过放行→不推卡片", func(t *testing.T) {
+		fb := &fakeApprover{}
+		fs := &fakeSender{}
+		p := NewJoinReview(nil, JoinMatchAI, false, nil, nil).WithAI(
+			&fakeCompleter{content: `{"pass":true,"reason":"对"}`}, "")
+		p.sender = fs
+		e := qaEvent()
+		p.review(fb, &e)
+		if fb.action != "approve" || len(fs.md) != 0 {
+			t.Errorf("action=%q cards=%d", fb.action, len(fs.md))
+		}
+	})
+	t.Run("自动拒绝→不推卡片", func(t *testing.T) {
+		fb := &fakeApprover{}
+		fs := &fakeSender{}
+		p := NewJoinReview(nil, JoinMatchAI, true, nil, nil).WithAI(
+			&fakeCompleter{content: `{"pass":false,"reason":"错"}`}, "")
+		p.sender = fs
+		e := qaEvent()
+		p.review(fb, &e)
+		if fb.action != "decline" || len(fs.md) != 0 {
+			t.Errorf("action=%q cards=%d", fb.action, len(fs.md))
+		}
+	})
+	t.Run("AI无法判定→推卡片", func(t *testing.T) {
+		fs := &fakeSender{}
+		p := NewJoinReview(nil, JoinMatchAI, false, nil, nil).WithAI(
+			&fakeCompleter{err: errors.New("网络抖动")}, "")
+		p.sender = fs
+		e := qaEvent()
+		p.review(&fakeApprover{}, &e)
+		if len(fs.md) != 1 {
+			t.Fatalf("应推 1 张卡片，got %d", len(fs.md))
+		}
+		if !strings.Contains(fs.md[0], "暂无法自动判定") {
+			t.Errorf("卡片应注明无法判定:\n%s", fs.md[0])
+		}
+	})
+	t.Run("md发送失败→纯文本兜底", func(t *testing.T) {
+		fs := &fakeSender{err: errors.New("语料审核拒绝")}
+		p := NewJoinReview(nil, JoinMatchAI, false, nil, nil).WithAI(
+			&fakeCompleter{content: `{"pass":false,"reason":"错"}`}, "")
+		p.sender = fs
+		e := qaEvent()
+		p.review(&fakeApprover{}, &e)
+		if len(fs.text) != 1 {
+			t.Fatalf("应发 1 条纯文本兜底，got %d", len(fs.text))
+		}
+		if !strings.Contains(fs.text[0], "审批 同意 ") || !strings.Contains(fs.text[0], "审批 拒绝 ") {
+			t.Errorf("纯文本应带文字命令引导:\n%s", fs.text[0])
+		}
+	})
+	t.Run("Notify关闭→不推", func(t *testing.T) {
+		fs := &fakeSender{}
+		p := NewJoinReview(nil, JoinMatchAI, false, nil, nil).WithAI(
+			&fakeCompleter{content: `{"pass":false,"reason":"错"}`}, "")
+		p.Notify = false
+		p.sender = fs
+		e := qaEvent()
+		p.review(&fakeApprover{}, &e)
+		if len(fs.md) != 0 || len(fs.text) != 0 {
+			t.Errorf("不应推送 cards=%d texts=%d", len(fs.md), len(fs.text))
+		}
+	})
+}
+
+// TestJoinTokenRegistry 卡片码注册表：登记/查询/移除、过期、按申请作废、容量上限。
+func TestJoinTokenRegistry(t *testing.T) {
+	p := NewJoinReview(nil, "", false, nil, nil)
+	e := qaEvent()
+
+	token := p.remember(&e, "AI理由")
+	if len(token) != joinTokenLen {
+		t.Fatalf("卡片码长度 %d, want %d", len(token), joinTokenLen)
+	}
+	pj := p.lookupJoinToken(token)
+	if pj == nil || pj.JoinRequestID != "JR1" || pj.Reason != "AI理由" || pj.GroupOpenID != "G1" {
+		t.Fatalf("lookup: %+v", pj)
+	}
+
+	// 过期后查不到
+	p.pending[token].Expires = time.Now().Add(-time.Minute)
+	if p.lookupJoinToken(token) != nil {
+		t.Error("过期卡片码不应命中")
+	}
+
+	// 处理成功按申请作废（同申请的所有卡片码一起失效）
+	t2 := p.remember(&e, "")
+	t3 := p.remember(&e, "")
+	if t2 == t3 {
+		t.Error("两次登记不应撞码")
+	}
+	p.forgetJoinRequest("JR1")
+	if p.lookupJoinToken(t2) != nil || p.lookupJoinToken(t3) != nil {
+		t.Error("作废后不应命中")
+	}
+
+	// 容量上限
+	for i := 0; i < joinPendingMax+20; i++ {
+		p.remember(&bot.GroupJoinRequestEvent{GroupOpenID: "G", JoinRequestID: fmt.Sprintf("JR%d", i)}, "")
+	}
+	if len(p.pending) > joinPendingMax {
+		t.Errorf("注册表应封顶 %d, got %d", joinPendingMax, len(p.pending))
+	}
+}
+
+// TestCanReview /审批 权限闸：白名单优先；未配置时群主/管理员/主人可用，
+// 普通成员与角色未知一律拒绝（按钮点进来的消息与手打同校验）。
+func TestCanReview(t *testing.T) {
+	b := bot.New(bot.Config{}, bot.WithOwners("master"))
+	mk := func(userID, role string) *bot.Ctx {
+		c := bot.NewEventCtx(b, "group", "审批", userID, "", "g1", "m1", "", true)
+		if role != "" {
+			b.EnrichGroupRoles(c, []byte(`{"d":{"author":{"member_role":"`+role+`"}}}`))
+		}
+		return c
+	}
+	p := NewJoinReview(nil, "", false, nil, nil)
+	cases := []struct {
+		userID, role string
+		want         bool
+	}{
+		{"u1", "member", false},
+		{"u1", "admin", true},
+		{"u1", "owner", true},
+		{"u1", "", false},          // 角色未知 fail-closed
+		{"master", "member", true}, // BOT_OWNERS 主人恒可用
+	}
+	for _, c := range cases {
+		if got := p.canReview(mk(c.userID, c.role)); got != c.want {
+			t.Errorf("canReview(user=%s role=%s)=%v, want %v", c.userID, c.role, got, c.want)
+		}
+	}
+	// 白名单模式：只有名单内 openid 可用，角色再高也不行
+	p2 := NewJoinReview(nil, "", false, nil, []string{"vip"})
+	if !p2.canReview(mk("vip", "member")) {
+		t.Error("白名单用户应可用")
+	}
+	if p2.canReview(mk("u1", "owner")) {
+		t.Error("白名单外即使群主也不应可用")
+	}
+}
+
+// TestDeclineReason 拒绝理由优先级：命令尾部参数 > AI 理由 > 默认理由；50 字截断。
+func TestDeclineReason(t *testing.T) {
+	p := NewJoinReview(nil, "", false, nil, nil)
+	mk := func(args ...string) *bot.Ctx {
+		c := bot.NewEventCtx(nil, "group", "审批", "u1", "", "g1", "m1", "", true)
+		c.Args = bot.Args{Args: args}
+		return c
+	}
+	if got := p.declineReason(mk("拒绝", "1"), "拒绝", "AI说的"); got != "AI说的" {
+		t.Errorf("AI理由优先于默认: %q", got)
+	}
+	if got := p.declineReason(mk("拒绝", "1"), "拒绝", ""); got != p.RejectReason {
+		t.Errorf("默认理由兜底: %q", got)
+	}
+	if got := p.declineReason(mk("拒绝", "1", "手打", "理由"), "拒绝", "AI说的"); got != "手打 理由" {
+		t.Errorf("手打理由最优先: %q", got)
+	}
+	if got := p.declineReason(mk("同意", "1"), "同意", "AI说的"); got != "" {
+		t.Errorf("非拒绝动作应返回空: %q", got)
+	}
+	long := strings.Repeat("长", 60)
+	if got := p.declineReason(mk("拒绝", "1"), "拒绝", long); len([]rune(got)) != 50 {
+		t.Errorf("应截断到 50 字: %d", len([]rune(got)))
+	}
 }

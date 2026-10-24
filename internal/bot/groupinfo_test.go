@@ -17,6 +17,7 @@ type infoSrv struct {
 }
 
 func (s *infoSrv) handler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.calls = append(s.calls, r.Method+" "+r.URL.Path)
@@ -48,10 +49,7 @@ func TestGroupInfoAndBotStateAPIs(t *testing.T) {
 	s := &infoSrv{}
 	srv := httptest.NewServer(http.HandlerFunc(s.handler))
 	t.Cleanup(srv.Close)
-	old := qqAPIBase
-	qqAPIBase = srv.URL
-	t.Cleanup(func() { qqAPIBase = old })
-	b := &Bot{tokenSource: &fakeTS{tok: "tok"}, appID: "APP"}
+	b := testBot(t, srv)
 
 	gi, err := b.GetGroupInfo(context.Background(), "G1")
 	if err != nil {
@@ -78,10 +76,7 @@ func TestListGroupJoinApprovalStrategies(t *testing.T) {
 	s := &infoSrv{}
 	srv := httptest.NewServer(http.HandlerFunc(s.handler))
 	t.Cleanup(srv.Close)
-	old := qqAPIBase
-	qqAPIBase = srv.URL
-	t.Cleanup(func() { qqAPIBase = old })
-	b := &Bot{tokenSource: &fakeTS{tok: "tok"}, appID: "APP"}
+	b := testBot(t, srv)
 
 	list, err := b.ListGroupJoinApprovalStrategies(context.Background())
 	if err != nil {

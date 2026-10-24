@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestSessionRoundTrip(t *testing.T) {
@@ -136,6 +137,55 @@ func TestSessionLoadTrimsOrphanTool(t *testing.T) {
 	}
 	if sess2.history[0].Role == RoleTool {
 		t.Errorf("历史不应以 tool 开头: %v", sess2.history)
+	}
+}
+
+func TestTrimByAge(t *testing.T) {
+	now := time.Now()
+	old := now.Add(-25 * time.Hour)
+	msgs := []Message{
+		{Role: RoleUser, Content: "旧问题", Ts: old},
+		{Role: RoleAssistant, Content: "旧回答", Ts: old},
+		{Role: RoleUser, Content: "新问题", Ts: now},
+		{Role: RoleAssistant, Content: "新回答", Ts: now},
+	}
+	// cutoff 在新旧之间：只保留新的一轮。
+	got := TrimByAge(msgs, now.Add(-time.Hour))
+	if len(got) != 2 || got[0].Content != "新问题" {
+		t.Fatalf("应只保留新消息，got=%v", got)
+	}
+
+	// 全部早于 cutoff → 清空（旧事走 search_history）。
+	if got := TrimByAge(msgs, now.Add(time.Hour)); len(got) != 0 {
+		t.Fatalf("应清空，got=%v", got)
+	}
+
+	// 全部新于 cutoff → 原样。
+	if got := TrimByAge(msgs, now.Add(-48*time.Hour)); len(got) != 4 {
+		t.Fatalf("应原样保留，got=%v", got)
+	}
+
+	// 零值 Ts（升级前存量数据）视为陈旧。
+	legacy := []Message{
+		{Role: RoleUser, Content: "存量旧消息"},
+		{Role: RoleUser, Content: "新消息", Ts: now},
+	}
+	got = TrimByAge(legacy, now.Add(-time.Minute))
+	if len(got) != 1 || got[0].Content != "新消息" {
+		t.Fatalf("零值 Ts 应被视为陈旧，got=%v", got)
+	}
+
+	// 切点落在 assistant 与其 tool 结果之间（长工具跨过 cutoff）：孤儿 tool 被丢弃，
+	// 保留部分从下一条 user 起，不以无主 tool 开头。
+	mixed := []Message{
+		{Role: RoleUser, Content: "旧问题", Ts: now.Add(-32 * time.Minute)},
+		{Role: RoleAssistant, Content: "旧调用", ToolCalls: []ToolCall{{ID: "1", Name: "x"}}, Ts: now.Add(-31 * time.Minute)},
+		{Role: RoleTool, ToolCallID: "1", Content: "刚出的结果", Ts: now.Add(-29 * time.Minute)},
+		{Role: RoleUser, Content: "新问题", Ts: now.Add(-time.Minute)},
+	}
+	got = TrimByAge(mixed, now.Add(-30*time.Minute))
+	if len(got) != 1 || got[0].Content != "新问题" {
+		t.Fatalf("孤儿 tool 不应残留，got=%v", got)
 	}
 }
 

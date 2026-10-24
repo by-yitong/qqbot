@@ -45,7 +45,7 @@ func (p *Session) installStop(b *bot.Bot) {
 		} else {
 			c.ReplyText("当前没有进行中的任务")
 		}
-	}).Desc("停止当前会话正在进行的处理").Alias("停止", "停下")
+	}).Desc("停止当前会话正在进行的处理").Alias("停止", "停下").Category(bot.CatAI)
 }
 
 // installReset .reset：清空当前会话的短期记忆（session；长期记忆库不受影响）。
@@ -69,7 +69,7 @@ func (p *Session) installReset(b *bot.Bot) {
 			}
 			c.ReplyText("当前会话已清空（长期记忆不受影响），开始新对话吧")
 		}()
-	}).Desc("清空当前会话的对话历史（长期记忆保留）").Alias("清空对话", "清空")
+	}).Desc("清空当前会话的对话历史（长期记忆保留）").Alias("清空对话", "清空").Category(bot.CatAI)
 }
 
 // installStatus .status：查看当前会话的处理状态。
@@ -92,7 +92,7 @@ func (p *Session) installStatus(b *bot.Bot) {
 		}
 		sb.WriteString("；模型 " + model)
 		c.ReplyText(sb.String())
-	}).Desc("查看当前会话的处理状态").Alias("状态")
+	}).Desc("查看当前会话的处理状态").Alias("状态").Category(bot.CatAI)
 }
 
 // installUsage .usage：token 用量统计（今日/累计；数据在记忆库，需 AGENT_MEMORY 开启）。
@@ -115,7 +115,7 @@ func (p *Session) installUsage(b *bot.Bot) {
 		if _, err := c.ReplyMarkdown(usageMarkdown(today, total)); err != nil {
 			c.ReplyText("今日：" + today.String() + "\n累计：" + total.String())
 		}
-	}).Desc("查看 token 用量统计（今日/累计）").Alias("用量")
+	}).Desc("查看 token 用量统计（今日/累计）").Alias("用量").Category(bot.CatAI)
 }
 
 // installMCP .mcp：连接一个 MCP server 的确定性入口（URL 或贴配置 JSON，不依赖 AI 判断）。
@@ -155,7 +155,7 @@ func (p *Session) installMCP(b *bot.Bot) {
 			lines = append(lines, cfg.Name+": 已连接，接入 "+strconv.Itoa(n)+" 个工具")
 		}
 		c.ReplyText(strings.Join(lines, "\n") + "\n已保存，重启后自动重连")
-	}).Desc("连接一个 MCP server（传 http/sse URL，或粘贴 MCP 配置 JSON）")
+	}).Desc("连接一个 MCP server（传 http/sse URL，或粘贴 MCP 配置 JSON）").Category(bot.CatAI)
 }
 
 // installSkill .skill：加载一个 SKILL.md（传 URL）。
@@ -176,7 +176,7 @@ func (p *Session) installSkill(b *bot.Bot) {
 			msg += "：" + sk.Description
 		}
 		c.ReplyText(msg)
-	}).Desc("加载一个 SKILL.md（传 URL）")
+	}).Desc("加载一个 SKILL.md（传 URL）").Category(bot.CatAI)
 }
 
 // usageMarkdown 把今日/累计用量渲染成 markdown（.usage 命令的展示层）。

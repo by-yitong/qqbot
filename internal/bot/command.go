@@ -22,6 +22,18 @@ func (a Args) Get(i int) string {
 // Join 返回命令名之后的整段文本，等价于 Raw。
 func (a Args) Join() string { return a.Raw }
 
+// 帮助分类常量（Command.Category 用；只影响帮助列表的分组展示，不参与命令匹配，
+// 未设置 Category 的命令归「通用」）。
+const (
+	CatGeneral = "通用"
+	CatFun     = "娱乐"
+	CatMusic   = "音乐"
+	CatGroup   = "群管"
+	CatAI      = "AI 助手"
+	CatTask    = "定时任务"
+	CatAdmin   = "管理"
+)
+
 // scope 记录命令的作用域限制。
 type scope struct {
 	groupOnly   bool
@@ -35,6 +47,7 @@ type Command struct {
 	aliases     []string
 	desc        string
 	usage       string
+	category    string // 帮助列表的分组（Cat* 常量；空 = 通用）
 	hidden      bool
 	hideBotMenu bool
 	requireAt   bool // 必须命中前缀或 @机器人 才触发（默认 false：裸文本也命中）
@@ -51,6 +64,9 @@ func (c *Command) Desc(s string) *Command { c.desc = s; return c }
 
 // Usage 设置用法示例（用于 /help）。
 func (c *Command) Usage(s string) *Command { c.usage = s; return c }
+
+// Category 设置帮助列表里的分组（见 Cat* 常量；不设置归「通用」）。
+func (c *Command) Category(s string) *Command { c.category = s; return c }
 
 // Alias 添加别名。
 func (c *Command) Alias(names ...string) *Command {
@@ -226,7 +242,86 @@ func (b *Bot) HelpFor(c *Ctx) string {
 	return b.help(c)
 }
 
-// help 生成帮助文本；viewer 为 nil 时不做身份过滤（内部字段照常跳过 hidden）。
+// HelpMarkdownFor 返回带官方内嵌指令标签的 markdown 版帮助（群/私聊场景；
+// 频道与 markdown 被拒发时降级用 HelpFor 的纯文本），按 Category 分类分组。
+// 每条命令的名字渲染成 CmdInputTag 标签：点击填入输入框——带 Usage 的命令
+// text 末尾补空格，用户接着敲参数即可。可见性过滤与 help() 一致。
+func (b *Bot) HelpMarkdownFor(c *Ctx) string {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	var sb strings.Builder
+	sb.WriteString("命令列表（点命令名填入输入框，补参数后发送）：\n")
+	for _, g := range b.groupedCmds(c) {
+		sb.WriteString("**【" + g.name + "】**\n")
+		for _, cmd := range g.cmds {
+			text := cmd.name
+			if cmd.usage != "" {
+				text += " "
+			}
+			line := "• " + CmdInputTag(text, cmd.name)
+			if len(cmd.aliases) > 0 {
+				line += "（" + strings.Join(cmd.aliases, ", ") + "）"
+			}
+			if cmd.usage != "" {
+				line += "  " + cmd.usage
+			}
+			if cmd.desc != "" {
+				line += "  — " + cmd.desc
+			}
+			sb.WriteString(line)
+			sb.WriteByte('\n')
+		}
+	}
+	return sb.String()
+}
+
+// cmdGroup 帮助输出里的一个分类分组。
+type cmdGroup struct {
+	name string
+	cmds []*Command
+}
+
+// groupedCmds 把对 viewer 可见的命令按 Category 分组：组内保持注册顺序，
+// 分组顺序取各分类首个命令出现的先后（未分类归「通用」）。调用方需持有读锁。
+func (b *Bot) groupedCmds(viewer *Ctx) []cmdGroup {
+	var groups []cmdGroup
+	idx := map[string]int{}
+	for _, c := range b.cmds {
+		if !c.visibleTo(viewer) {
+			continue
+		}
+		name := c.category
+		if name == "" {
+			name = CatGeneral
+		}
+		if _, ok := idx[name]; !ok {
+			idx[name] = len(groups)
+			groups = append(groups, cmdGroup{name: name})
+		}
+		groups[idx[name]].cmds = append(groups[idx[name]].cmds, c)
+	}
+	return groups
+}
+
+// visibleTo 命令是否对 viewer 可见（帮助列表用）：hidden 恒不可见；viewer 为 nil
+// 时不做身份过滤，否则 OwnerOnly/AdminOnly 按身份过滤。
+func (c *Command) visibleTo(viewer *Ctx) bool {
+	if c.hidden {
+		return false
+	}
+	if viewer != nil {
+		if c.ownerOnly && !viewer.IsOwner() {
+			return false
+		}
+		if c.adminOnly && !viewer.adminOrOwner() {
+			return false
+		}
+	}
+	return true
+}
+
+// help 生成帮助文本（按 Category 分类分组）；viewer 为 nil 时不做身份过滤
+// （内部字段照常跳过 hidden）。
 func (b *Bot) help(viewer *Ctx) string {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
@@ -236,31 +331,23 @@ func (b *Bot) help(viewer *Ctx) string {
 	}
 	var sb strings.Builder
 	sb.WriteString("命令列表：\n")
-	for _, c := range b.cmds {
-		if c.hidden {
-			continue
-		}
-		if viewer != nil {
-			if c.ownerOnly && !viewer.IsOwner() {
-				continue
+	for _, g := range b.groupedCmds(viewer) {
+		sb.WriteString("【" + g.name + "】\n")
+		for _, c := range g.cmds {
+			names := pref + c.name
+			if len(c.aliases) > 0 {
+				names += "（" + strings.Join(c.aliases, ", ") + "）"
 			}
-			if c.adminOnly && !viewer.adminOrOwner() {
-				continue
+			line := "• " + names
+			if c.usage != "" {
+				line += "  " + c.usage
 			}
+			if c.desc != "" {
+				line += "  — " + c.desc
+			}
+			sb.WriteString(line)
+			sb.WriteByte('\n')
 		}
-		names := pref + c.name
-		if len(c.aliases) > 0 {
-			names += "（" + strings.Join(c.aliases, ", ") + "）"
-		}
-		line := "• " + names
-		if c.usage != "" {
-			line += "  " + c.usage
-		}
-		if c.desc != "" {
-			line += "  — " + c.desc
-		}
-		sb.WriteString(line)
-		sb.WriteByte('\n')
 	}
 	return sb.String()
 }

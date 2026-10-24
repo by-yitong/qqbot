@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 )
 
 // SessionMaxHistory 是单用户历史的硬上限（条），防止失控增长（压缩后也会被截到该上限内）。
@@ -50,6 +51,21 @@ func trimLeadingOrphans(msgs []Message) []Message {
 		msgs = msgs[1:]
 	}
 	return msgs
+}
+
+// TrimByAge 会话时间衰减：丢弃 Ts 不晚于 cutoff 的旧消息，只保留近期窗口。
+// Ts 为零值（升级前的存量数据）一律视为陈旧。被丢弃的消息并不丢失——长期记忆库
+// 有全量记录，模型需要旧事时可经 search_history 检索；这里只决定「不占上下文」。
+// 切点若落在 tool 批中间，保留部分开头的孤儿 tool 消息一并丢弃（同 trimLeadingOrphans）。
+func TrimByAge(msgs []Message, cutoff time.Time) []Message {
+	cut := 0
+	for cut < len(msgs) && !msgs[cut].Ts.After(cutoff) {
+		cut++
+	}
+	if cut == 0 {
+		return msgs
+	}
+	return trimLeadingOrphans(msgs[cut:])
 }
 
 // load 从 JSONL 文件读取历史（文件不存在视为空历史）。坏行跳过。

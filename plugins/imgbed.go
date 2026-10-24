@@ -49,7 +49,8 @@ func NewImgbedFromEnv() (p bot.Plugin, cli *imgbed.Client, max int64) {
 func (p *Imgbed) Install(b *bot.Bot) {
 	b.Command("图床", p.run).
 		Desc("把消息里的图片上传图床，回复公网外链").
-		Alias("imgbed", "外链", "上传图片")
+		Alias("imgbed", "外链", "上传图片").
+		Category(bot.CatGeneral)
 }
 
 func (p *Imgbed) run(c *bot.Ctx) {

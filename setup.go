@@ -115,6 +115,24 @@ func setupAgent(b *bot.Bot, mem *memory.Store, imgbedCli *imgbed.Client, imgbedM
 		log.Println("[agent] 已启用文件读写工具，根目录: " + root)
 	}
 
+	// selfdev 工具（默认关）：AI 为主人开发/修改 bot 自己的 Go 插件
+	// （plugin_list/plugin_read/plugin_write/plugin_edit + deploy：检查链全过才异步重启，
+	// 见 tools/selfdev.go）。写范围仅 plugins/*.go 与 main.go；fail-closed：未配置
+	// BOT_OWNERS 则不启用（这些工具只认主人，没主人就没人可用）。
+	if utils.EnvOr("AGENT_ENABLE_SELFDEV", "0") == "1" {
+		if len(utils.SplitList(os.Getenv("BOT_OWNERS"))) > 0 {
+			dev := tools.NewDevEnv(".") // systemd WorkingDirectory = 仓库根
+			reg.Register(&tools.PluginList{Dev: dev})
+			reg.Register(&tools.PluginRead{Dev: dev})
+			reg.Register(&tools.PluginWrite{Dev: dev})
+			reg.Register(&tools.PluginEdit{Dev: dev})
+			reg.Register(&tools.Deploy{Dev: dev})
+			log.Println("[agent] 已启用 selfdev 工具（plugin_list/plugin_read/plugin_write/plugin_edit/deploy，仅主人可用）")
+		} else {
+			log.Println("[agent] AGENT_ENABLE_SELFDEV=1 但未配置 BOT_OWNERS，selfdev 不启用（fail-closed）")
+		}
+	}
+
 	sessions, err := agent.NewSessionStore(utils.EnvOr("AGENT_HISTORY_DIR", "./data/sessions"))
 	if err != nil {
 		log.Fatalf("创建会话目录失败: %v", err)
@@ -196,9 +214,12 @@ func setupAgent(b *bot.Bot, mem *memory.Store, imgbedCli *imgbed.Client, imgbedM
 		LoopTimeout:         utils.EnvDurationSec("AGENT_LOOP_TIMEOUT", 0),
 		CompactionThreshold: utils.EnvInt("AGENT_COMPACTION_THRESHOLD", 6000),
 		KeepRecent:          utils.EnvInt("AGENT_KEEP_RECENT", 0),
-		Skills:              skills,
-		SkillsDir:           utils.EnvOr("AGENT_SKILLS_DIR", "./skills"),
-		RuntimeMCPCfg:       runtimeMCPPath,
+		// 会话时间衰减（分钟，默认 720=12h，0 关）：超过该时长没活动的旧历史不带入
+		// 上下文——群冷场几天后有人 @，不再背着几天前的对话；旧事可走 search_history 查。
+		SessionTTL:    time.Duration(utils.EnvInt("AGENT_SESSION_TTL", 720)) * time.Minute,
+		Skills:        skills,
+		SkillsDir:     utils.EnvOr("AGENT_SKILLS_DIR", "./skills"),
+		RuntimeMCPCfg: runtimeMCPPath,
 	})
 	// 让 AI 在对话中能自主添加技能/MCP（用户发 URL 或贴配置 JSON 即可）。
 	ag.RegisterControlTools(reg)
@@ -210,7 +231,12 @@ func setupAgent(b *bot.Bot, mem *memory.Store, imgbedCli *imgbed.Client, imgbedM
 		utils.EnvInt("AGENT_RECENT_MAX", 30)),
 		plugins.WithGapFile(utils.EnvOr("AGENT_GAP_MARKERS", "./data/gap_markers.json")),
 		plugins.WithImageHost(imgHost),
-		plugins.WithSteerAck(utils.EnvInt("AGENT_STEER_ACK", 1) != 0))
+		plugins.WithSteerAck(utils.EnvInt("AGENT_STEER_ACK", 1) != 0),
+		// 长任务提示：Run 超过 AGENT_HINT_SEC（默认 8s，0=关）没结束先回「任务进行中」，
+		// 结束撤回；超 2 分钟撤回窗口按 AGENT_HINT_REFRESH_SEC（默认 100s）滚动换新。
+		plugins.WithProgressHint(
+			time.Duration(utils.EnvInt("AGENT_HINT_SEC", 8))*time.Second,
+			time.Duration(utils.EnvInt("AGENT_HINT_REFRESH_SEC", 100))*time.Second))
 
 	// 短视频解析（注册在 Agent 之前：命中分享链接即 Abort，不触发 AI 兜底）。
 	b.UsePlugin(plugins.NewVideo(imgHost))

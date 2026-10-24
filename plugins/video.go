@@ -4,13 +4,11 @@ package plugins
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"hash/fnv"
 	"io"
 	"log"
 	"net/http"
-	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -19,7 +17,6 @@ import (
 
 	"qqbot/internal/bot"
 	"qqbot/internal/imgstore"
-	"qqbot/internal/utils"
 )
 
 // shareLinkRE 从分享文案中提取抖音/快手短链（链接混在口令文字中间，必须正则扫）。
@@ -34,26 +31,18 @@ const maxProxyBytes = 200 << 20
 
 // VideoPlugin 短视频解析插件。
 type VideoPlugin struct {
-	apiBase string // 星之阁 API 基址（抖音兜底源）
+	ly      *LuoyingClient // luoying 解析 API（抖音/快手）
 	imgHost *imgstore.Host
-	dy      *DouyinClient // 抖音直连解析（主源）
-	zsz     *ZszClient    // zhishuzhan 快手解析（可 nil = 快手降级提示）
-	client  *http.Client  // 下载视频直链用（独立于 resty，放宽超时）
+	client  *http.Client // 下载视频直链用（独立于 resty，放宽超时）
 
 	mu sync.Map // link-hash -> 解析开始时间（去重）
 }
 
 // NewVideo 创建插件。imgHost 用于视频直链被 QQ 拉取失败时的图床中转。
 func NewVideo(imgHost *imgstore.Host) *VideoPlugin {
-	base := os.Getenv("XZG_API_BASE")
-	if base == "" {
-		base = "https://api.xingzhige.com/API"
-	}
 	return &VideoPlugin{
-		apiBase: base,
+		ly:      NewLuoyingClient(),
 		imgHost: imgHost,
-		dy:      NewDouyinClient(),
-		zsz:     NewZszClient(),
 		client:  &http.Client{Timeout: 4 * time.Minute},
 	}
 }
@@ -119,9 +108,9 @@ func (p *VideoPlugin) handle(ctx context.Context, c *bot.Ctx, link string) error
 	)
 	switch {
 	case strings.Contains(link, "douyin.com"):
-		res, err = p.parseDouyin(ctx, link)
+		res, err = p.ly.ParseDouyin(ctx, link)
 	case strings.Contains(link, "kuaishou.com"):
-		res, err = p.parseKuaishou(ctx, c, link)
+		res, err = p.ly.ParseKuaishou(ctx, link)
 	default:
 		return fmt.Errorf("不支持的链接")
 	}
@@ -206,100 +195,6 @@ func (p *VideoPlugin) download(ctx context.Context, url string) ([]byte, string,
 		return nil, "", fmt.Errorf("视频超过 %dMB 中转上限", maxProxyBytes>>20)
 	}
 	return data, resp.Header.Get("Content-Type"), nil
-}
-
-// parseDouyin 抖音解析：直连为主（不依赖第三方，第三方解析站时有停摆），
-// 直连失败再退星之阁；两边都挂才报错，错误信息带上两边原因便于排查。
-func (p *VideoPlugin) parseDouyin(ctx context.Context, link string) (*VideoResult, error) {
-	res, dyErr := p.dy.Parse(ctx, link)
-	if dyErr == nil {
-		return res, nil
-	}
-	log.Printf("[video] 抖音直连解析失败，退星之阁: %v", dyErr)
-	res, xzErr := p.parseDouyinXZG(ctx, link)
-	if xzErr == nil {
-		return res, nil
-	}
-	return nil, fmt.Errorf("抖音直连: %v；星之阁: %v", dyErr, xzErr)
-}
-
-// ---- 星之阁 抖音解析（兜底源） ----
-
-// xzgResp 星之阁 douyin 接口返回结构（按实际样例裁剪）。
-type xzgResp struct {
-	Code int    `json:"code"`
-	Msg  string `json:"msg"`
-	Data struct {
-		Jx struct {
-			URL    string `json:"url"`
-			ItemID string `json:"item_id"`
-			Type   string `json:"type"` // "视频" / "图集"
-		} `json:"jx"`
-		Author struct {
-			Name string `json:"name"`
-			UID  string `json:"uid"`
-		} `json:"author"`
-		Stat struct {
-			Like    int64 `json:"like"`
-			Comment int64 `json:"comment"`
-			Share   int64 `json:"share"`
-		} `json:"stat"`
-		Item struct {
-			Title    string   `json:"title"`
-			Cover    string   `json:"cover"`
-			URL      string   `json:"url"`
-			Images   []string `json:"images"`
-			Quality  string   `json:"quality"`
-			Duration float64  `json:"duration"`
-			SizeStr  string   `json:"size_str"`
-		} `json:"item"`
-	} `json:"data"`
-}
-
-func (p *VideoPlugin) parseDouyinXZG(ctx context.Context, link string) (*VideoResult, error) {
-	var r xzgResp
-	if _, err := utils.HttpClient.R().
-		SetContext(ctx).
-		SetQueryParam("url", link).
-		SetResult(&r).
-		Get(p.apiBase + "/douyin/"); err != nil {
-		return nil, fmt.Errorf("解析接口请求失败: %w", err)
-	}
-	if r.Code != 0 {
-		return nil, fmt.Errorf("解析接口 code=%d: %s", r.Code, r.Msg)
-	}
-	return &VideoResult{
-		Title:    r.Data.Item.Title,
-		Author:   r.Data.Author.Name,
-		Like:     r.Data.Stat.Like,
-		Comment:  r.Data.Stat.Comment,
-		Share:    r.Data.Stat.Share,
-		VideoURL: r.Data.Item.URL,
-		Images:   r.Data.Item.Images,
-		Quality:  r.Data.Item.Quality,
-		SizeStr:  r.Data.Item.SizeStr,
-		Duration: r.Data.Item.Duration,
-	}, nil
-}
-
-// parseKuaishou 走 zhishuzhan：先试现有登录态，403 再走扫码流程后重试。
-func (p *VideoPlugin) parseKuaishou(ctx context.Context, c *bot.Ctx, link string) (*VideoResult, error) {
-	if p.zsz == nil {
-		return nil, fmt.Errorf("快手解析未启用")
-	}
-	res, err := p.zsz.Parse(ctx, link)
-	if err == nil || !errors.Is(err, ErrZszLoginRequired) {
-		return res, err
-	}
-	if err := p.zsz.EnsureLogin(ctx, func(imgURL string) error {
-		replyPlain(c, "快手解析需要在 zhishuzhan 扫码登录，请用微信扫这张码（4 分钟内有效），扫完自动继续：")
-		_, err := c.ReplyImage(imgURL)
-		return err
-	}); err != nil {
-		return nil, err
-	}
-	replyPlain(c, "扫码成功，继续解析…")
-	return p.zsz.Parse(ctx, link)
 }
 
 // ---- 解析结果模型 ----

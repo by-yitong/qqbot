@@ -28,6 +28,7 @@ func (s *memberSrv) record(r *http.Request, body string) {
 func TestListGroupMembersPagination(t *testing.T) {
 	s := &memberSrv{}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
 		body, _ := io.ReadAll(r.Body)
 		s.record(r, string(body))
 		if r.URL.Query().Get("cursor") == "" {
@@ -38,10 +39,7 @@ func TestListGroupMembersPagination(t *testing.T) {
 		_, _ = w.Write([]byte(`{"members":[{"member_openid":"M2","username":"小红","member_role":"member","bot":true}],"next_cursor":""}`))
 	}))
 	t.Cleanup(srv.Close)
-	old := qqAPIBase
-	qqAPIBase = srv.URL
-	t.Cleanup(func() { qqAPIBase = old })
-	b := &Bot{tokenSource: &fakeTS{tok: "tok"}, appID: "APP"}
+	b := testBot(t, srv)
 
 	ms, err := b.ListGroupMembers(context.Background(), "G1")
 	if err != nil {
@@ -69,6 +67,7 @@ func TestListGroupMembersPagination(t *testing.T) {
 func TestGetGroupMember(t *testing.T) {
 	s := &memberSrv{}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
 		body, _ := io.ReadAll(r.Body)
 		s.record(r, string(body))
 		if r.URL.Path != "/v2/groups/G1/members/M9" {
@@ -79,10 +78,7 @@ func TestGetGroupMember(t *testing.T) {
 			`"joined_at":"2025-08-20T09:15:00+08:00","union_openid":"B4C6"}`))
 	}))
 	t.Cleanup(srv.Close)
-	old := qqAPIBase
-	qqAPIBase = srv.URL
-	t.Cleanup(func() { qqAPIBase = old })
-	b := &Bot{tokenSource: &fakeTS{tok: "tok"}, appID: "APP"}
+	b := testBot(t, srv)
 
 	m, err := b.GetGroupMember(context.Background(), "G1", "M9")
 	if err != nil {
@@ -100,15 +96,13 @@ func TestGetGroupMember(t *testing.T) {
 func TestRemoveGroupMembers(t *testing.T) {
 	s := &memberSrv{}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
 		body, _ := io.ReadAll(r.Body)
 		s.record(r, string(body))
 		_, _ = w.Write([]byte(`{"remove_members_result":"success","add_to_member_blacklist_fail_openids":["M2"]}`))
 	}))
 	t.Cleanup(srv.Close)
-	old := qqAPIBase
-	qqAPIBase = srv.URL
-	t.Cleanup(func() { qqAPIBase = old })
-	b := &Bot{tokenSource: &fakeTS{tok: "tok"}, appID: "APP"}
+	b := testBot(t, srv)
 
 	res, err := b.RemoveGroupMembers(context.Background(), "G1", []string{"M1", "M2"}, true)
 	if err != nil {
@@ -153,6 +147,7 @@ func TestRemoveGroupMembers(t *testing.T) {
 func TestListGroupBlacklist(t *testing.T) {
 	s := &memberSrv{}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
 		body, _ := io.ReadAll(r.Body)
 		s.record(r, string(body))
 		if r.URL.Query().Get("cursor") == "" {
@@ -163,10 +158,7 @@ func TestListGroupBlacklist(t *testing.T) {
 		_, _ = w.Write([]byte(`{"users":[],"next_cursor":""}`))
 	}))
 	t.Cleanup(srv.Close)
-	old := qqAPIBase
-	qqAPIBase = srv.URL
-	t.Cleanup(func() { qqAPIBase = old })
-	b := &Bot{tokenSource: &fakeTS{tok: "tok"}, appID: "APP"}
+	b := testBot(t, srv)
 
 	users, err := b.ListGroupBlacklist(context.Background(), "G1")
 	if err != nil {
@@ -187,15 +179,13 @@ func TestListGroupBlacklist(t *testing.T) {
 func TestSetGroupBlacklist(t *testing.T) {
 	s := &memberSrv{}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
 		body, _ := io.ReadAll(r.Body)
 		s.record(r, string(body))
 		_, _ = w.Write([]byte(`{"fail_openids":["M3"]}`))
 	}))
 	t.Cleanup(srv.Close)
-	old := qqAPIBase
-	qqAPIBase = srv.URL
-	t.Cleanup(func() { qqAPIBase = old })
-	b := &Bot{tokenSource: &fakeTS{tok: "tok"}, appID: "APP"}
+	b := testBot(t, srv)
 
 	fail, err := b.SetGroupBlacklist(context.Background(), "G1", BlacklistOpAdd, []string{"M1", "M3"})
 	if err != nil {

@@ -1,5 +1,7 @@
 package agent
 
+import "time"
+
 // Role 是消息角色。
 type Role string
 
@@ -27,6 +29,7 @@ type Message struct {
 	ToolCalls  []ToolCall // 仅 assistant 可携带（请求调用工具）
 	ToolCallID string     // role==tool 时，对应的 ToolCall.ID
 	Name       string     // role==tool 时，工具名
+	Ts         time.Time  // 消息进入历史的时刻（Agent 在 Run 内打点，随 session 落盘）；时间衰减（SessionTTL）按它判断新旧，升级前的旧数据为零值、视为陈旧
 
 	// ephemeral 标记「临时上下文消息」（如增量群聊动态）：随请求发给 LLM，
 	// 但 persist 时剥离、永不落 session。放在问题消息紧前面——动态内容位于
@@ -46,6 +49,15 @@ func NewUserWithImages(s string, imgs []string) Message {
 
 // newEphemeralUser 构造一条临时 user 消息（发 LLM、不落 session）。
 func newEphemeralUser(s string) Message { return Message{Role: RoleUser, Content: s, ephemeral: true} }
+
+// stamped 给消息打上进入历史的时刻（未打过才打，幂等）。
+// 会话时间衰减（SessionTTL）以它判断新旧，Agent 在每个持久化追加点调用。
+func stamped(m Message) Message {
+	if m.Ts.IsZero() {
+		m.Ts = time.Now()
+	}
+	return m
+}
 
 // stripEphemeral 剥离临时消息（persist 前调用）。
 func stripEphemeral(msgs []Message) []Message {

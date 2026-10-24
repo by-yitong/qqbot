@@ -1,124 +1,63 @@
 package bot
 
-// 入群申请管理接口（官方 2026-08-10 新增，botgo v0.2.1 未覆盖，经 qqAPI 自行 HTTP 调用）。
+// 入群申请管理（协议实现在 pkg/botgo，本层只做连接保护与类型别名）。
 //
 //   - 审批：POST /v2/groups/{group_openid}/approval_join_request/{member_openid}
 //     op=approve 通过 / decline 拒绝；join_request_id 从事件回传。60 QPM，需机器人是群管理员。
 //   - 列表：GET /v2/groups/{group_openid}/join_request_list（分页）。30 QPM，需群管理员。
 //   - 自动审批策略列表：GET /v2/groups/join_approval_strategy（分页，不带群 id，机器人维度）。60 QPM。
-//
-// 文档：https://bot.q.qq.com/wiki/develop/api-v2/autogen/api/v2_groups_group_openid_approval_join_request_member_openid.post.html
 
 import (
 	"context"
-	"encoding/json"
-	"fmt"
-	"net/http"
-	"net/url"
+
+	"qqbot/pkg/botgo/dto"
 )
 
-// JoinReviewOpApprove / JoinReviewOpDecline 是审批动作。
+// JoinReviewOpApprove / JoinReviewOpDecline 是审批动作（转发 dto 常量，保持旧引用兼容）。
 const (
-	JoinReviewOpApprove = "approve"
-	JoinReviewOpDecline = "decline"
+	JoinReviewOpApprove = dto.JoinRequestApprove
+	JoinReviewOpDecline = dto.JoinRequestDecline
 )
 
-// joinReviewReq 是审批接口的请求体。
-type joinReviewReq struct {
-	Op            string `json:"op"`
-	JoinRequestID string `json:"join_request_id,omitempty"`
-	RejectReason  string `json:"reject_reason,omitempty"` // 仅 decline
-}
+// GroupJoinRequestItem 是 join_request_list 返回的申请项。
+type GroupJoinRequestItem = dto.GroupJoinRequest
+
+// JoinApprovalStrategy 入群自动审批策略：把关联群中命中白名单 QQ 号的入群申请
+// 自动审批通过。一个机器人最多 20 个策略；仅在机器人拥有关联群管理员身份时生效。
+// （另有创建/修改/删除/执行/白名单维护接口，见 pkg/botgo dto 注释里的官方文档。）
+type JoinApprovalStrategy = dto.JoinApprovalStrategy
 
 // ApproveGroupJoinRequest 审批一条入群申请（通过或拒绝）。
 // joinRequestID 建议从事件带回（官方标注可选，回传可精确定位申请）；
 // decline 时可带 rejectReason（给申请人看的拒绝理由）。需机器人是群管理员。
 func (b *Bot) ApproveGroupJoinRequest(ctx context.Context, groupOpenID, memberOpenID, joinRequestID, op, rejectReason string) error {
-	if op != JoinReviewOpApprove && op != JoinReviewOpDecline {
-		return fmt.Errorf("非法审批动作: %s", op)
+	api, err := b.openapi()
+	if err != nil {
+		return err
 	}
-	_, err := b.qqAPI(ctx, http.MethodPost,
-		"/v2/groups/"+url.PathEscape(groupOpenID)+"/approval_join_request/"+url.PathEscape(memberOpenID),
-		joinReviewReq{Op: op, JoinRequestID: joinRequestID, RejectReason: rejectReason})
-	return err
+	return api.ApproveGroupJoinRequest(ctx, groupOpenID, memberOpenID, dto.JoinRequestApproval{
+		Op:            op,
+		JoinRequestID: joinRequestID,
+		RejectReason:  rejectReason,
+	})
 }
-
-// GroupJoinRequestItem 是 join_request_list 返回的申请项（字段同 GroupJoinRequestEvent，
-// 但列表项不带 group_openid——群已由请求路径指定）。
-type GroupJoinRequestItem = GroupJoinRequestEvent
 
 // ListGroupJoinRequests 拉取一个群的待处理入群申请列表（自动翻页聚合）。
 // 需机器人是群管理员。
 func (b *Bot) ListGroupJoinRequests(ctx context.Context, groupOpenID string) ([]GroupJoinRequestItem, error) {
-	var out []GroupJoinRequestItem
-	cursor := ""
-	for {
-		path := "/v2/groups/" + url.PathEscape(groupOpenID) + "/join_request_list?limit=50"
-		if cursor != "" {
-			path += "&cursor=" + url.QueryEscape(cursor)
-		}
-		body, err := b.qqAPI(ctx, http.MethodGet, path, nil)
-		if err != nil {
-			return nil, err
-		}
-		var page struct {
-			List       []GroupJoinRequestItem `json:"list"`
-			NextCursor string                 `json:"next_cursor"`
-		}
-		if err := json.Unmarshal(body, &page); err != nil {
-			return nil, fmt.Errorf("解析入群申请列表: %w", err)
-		}
-		out = append(out, page.List...)
-		if page.NextCursor == "" || len(page.List) == 0 {
-			return out, nil
-		}
-		cursor = page.NextCursor
+	api, err := b.openapi()
+	if err != nil {
+		return nil, err
 	}
-}
-
-// --- 入群自动审批策略（官方 2026-08 新增，botgo v0.2.1 未覆盖）---
-
-// JoinApprovalStrategy 入群自动审批策略：把关联群中命中白名单 QQ 号的入群申请
-// 自动审批通过。一个机器人最多 20 个策略；仅在机器人拥有关联群管理员身份时生效。
-// （另有创建/修改/删除/执行/白名单维护接口，文档：
-// https://bot.q.qq.com/wiki/develop/api-v2/server-inter/group/manage/join-approval-strategy.html）
-type JoinApprovalStrategy struct {
-	StrategyID         string   `json:"strategy_id"`
-	GroupOpenIDs       []string `json:"group_openids"`        // 关联群 openid（创建时用 group_openids 才返回）
-	GroupIDs           []string `json:"group_ids"`            // 关联 QQ 群号（创建时用 group_ids 才返回）
-	WhitelistUserCount int      `json:"whitelist_user_count"` // 白名单号码数量估算值（可能有少量误差）
-	IsEnable           string   `json:"is_enable"`            // on 启用 / off 关闭
-	ExpireAt           string   `json:"expire_at"`            // 过期时间（RFC3339）
-	CreatedAt          string   `json:"created_at"`           // 创建时间（RFC3339）
-	UpdatedAt          string   `json:"updated_at"`           // 最近更新（RFC3339）
-	Remark             string   `json:"remark"`               // 备注
+	return api.ListGroupJoinRequests(ctx, groupOpenID)
 }
 
 // ListGroupJoinApprovalStrategies 拉取入群自动审批策略列表（自动翻页聚合）。
 // 注意路径不带群 id——策略是机器人维度的，一个策略可关联多个群；60 QPM。
 func (b *Bot) ListGroupJoinApprovalStrategies(ctx context.Context) ([]JoinApprovalStrategy, error) {
-	var out []JoinApprovalStrategy
-	cursor := ""
-	for {
-		path := "/v2/groups/join_approval_strategy?limit=50"
-		if cursor != "" {
-			path += "&cursor=" + url.QueryEscape(cursor)
-		}
-		body, err := b.qqAPI(ctx, http.MethodGet, path, nil)
-		if err != nil {
-			return nil, err
-		}
-		var page struct {
-			Strategies []JoinApprovalStrategy `json:"strategies"`
-			NextCursor string                 `json:"next_cursor"`
-		}
-		if err := json.Unmarshal(body, &page); err != nil {
-			return nil, fmt.Errorf("解析入群自动审批策略列表: %w", err)
-		}
-		out = append(out, page.Strategies...)
-		if page.NextCursor == "" || len(page.Strategies) == 0 {
-			return out, nil
-		}
-		cursor = page.NextCursor
+	api, err := b.openapi()
+	if err != nil {
+		return nil, err
 	}
+	return api.ListJoinApprovalStrategies(ctx)
 }

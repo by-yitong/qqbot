@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 )
 
 // stubLLM 是 Completer 的测试替身：依次返回 seq，用完则重复最后一个。
@@ -249,6 +250,91 @@ func TestAgentPersistBlockInSession(t *testing.T) {
 	}
 	if len(llm.lastMsgs) == 0 || !strings.Contains(llm.lastMsgs[0].Content, "小明: 闲聊") {
 		t.Fatalf("下一轮请求应自动携带上一轮补充块: %+v", llm.lastMsgs)
+	}
+}
+
+func TestAgentSessionTTLDropsStaleHistory(t *testing.T) {
+	// session 里预置「两天前的旧对话 + 十分钟前的新对话」，TTL=1 小时：
+	// 旧对话不应进入请求上下文、也不留在落盘历史；新对话保留，
+	// 且本次追加的消息带 Ts 落盘（下次衰减判断的依据）。
+	llm := &recSysLLM{}
+	sessions, err := NewSessionStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess := sessions.Get("g:g1")
+	sess.Lock()
+	sess.ReplaceHistory([]Message{
+		{Role: RoleUser, Content: "两天前的问题", Ts: time.Now().Add(-48 * time.Hour)},
+		{Role: RoleAssistant, Content: "两天前的回答", Ts: time.Now().Add(-48 * time.Hour)},
+		{Role: RoleUser, Content: "十分钟前的问题", Ts: time.Now().Add(-10 * time.Minute)},
+		{Role: RoleAssistant, Content: "十分钟前的回答", Ts: time.Now().Add(-10 * time.Minute)},
+	})
+	sess.Unlock()
+
+	a := New(Config{LLM: llm, Sessions: sessions, SessionTTL: time.Hour})
+	if _, err := a.Run(context.Background(), "g:g1", "新问题"); err != nil {
+		t.Fatal(err)
+	}
+
+	// 请求：近历史 + 新问题，旧对话不出现。
+	for _, m := range llm.lastMsgs {
+		if strings.Contains(m.Content, "两天前") {
+			t.Fatalf("旧历史不应进入上下文: %+v", llm.lastMsgs)
+		}
+	}
+	if len(llm.lastMsgs) != 3 || llm.lastMsgs[0].Content != "十分钟前的问题" {
+		t.Fatalf("应携带近历史 + 新问题，实际: %+v", llm.lastMsgs)
+	}
+
+	// 落盘历史被瘦身（旧对话移除），且所有消息带非零 Ts。
+	sess.Lock()
+	hist := append([]Message{}, sess.History()...)
+	sess.Unlock()
+	if len(hist) != 4 { // 近历史 2 条 + 新问 + 新答
+		t.Fatalf("落盘应剩 4 条，实际 %d: %+v", len(hist), hist)
+	}
+	for i, m := range hist {
+		if m.Ts.IsZero() {
+			t.Errorf("hist[%d] 应带 Ts（否则下次衰减误判为陈旧）: %+v", i, m)
+		}
+	}
+
+	// 零值 Ts（升级前存量数据）同样被视为陈旧剔除。
+	sess.Lock()
+	sess.ReplaceHistory([]Message{
+		{Role: RoleUser, Content: "存量旧消息"},
+	})
+	sess.Unlock()
+	llm.lastMsgs = nil
+	if _, err := a.Run(context.Background(), "g:g1", "又一条"); err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range llm.lastMsgs {
+		if strings.Contains(m.Content, "存量旧消息") {
+			t.Fatalf("零值 Ts 的存量消息应被视为陈旧: %+v", llm.lastMsgs)
+		}
+	}
+}
+
+func TestAgentSessionTTLOffKeepsHistory(t *testing.T) {
+	// SessionTTL=0（默认）：时间衰减关闭，旧历史照常携带（向后兼容）。
+	llm := &recSysLLM{}
+	sessions, _ := NewSessionStore(t.TempDir())
+	sess := sessions.Get("u1")
+	sess.Lock()
+	sess.ReplaceHistory([]Message{
+		{Role: RoleUser, Content: "一周前的问题", Ts: time.Now().AddDate(0, 0, -7)},
+		{Role: RoleAssistant, Content: "一周前的回答", Ts: time.Now().AddDate(0, 0, -7)},
+	})
+	sess.Unlock()
+
+	a := New(Config{LLM: llm, Sessions: sessions})
+	if _, err := a.Run(context.Background(), "u1", "新问题"); err != nil {
+		t.Fatal(err)
+	}
+	if len(llm.lastMsgs) != 3 || llm.lastMsgs[0].Content != "一周前的问题" {
+		t.Fatalf("TTL 关闭时历史应原样携带: %+v", llm.lastMsgs)
 	}
 }
 

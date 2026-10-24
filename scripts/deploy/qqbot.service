@@ -1,46 +1,52 @@
-# systemd 服务单元：让 qqbot 在后台常驻、开机自启、崩溃自重启。
+# systemd 服务单元模板：让 qqbot 后台常驻、开机自启、崩溃自重启。
 #
-# 安装（需要 sudo，输入你的密码）：
-#   sudo cp deploy/qqbot.service /etc/systemd/system/qqbot.service
+# ⚠️ 本机（qiqi.prizen.cn 服务器）已安装为 qqbot-agent.service 且 enabled——
+# 这是生产唯一运行方式，日常只需：
+#   go build -o qqbot . && sudo systemctl restart qqbot-agent
+# 详见仓库根 AGENTS.md（AI 项目记忆）。
+#
+# 全新机器安装（需要 sudo）：
+#   sudo cp scripts/deploy/qqbot.service /etc/systemd/system/qqbot-agent.service
 #   sudo systemctl daemon-reload
-#   sudo systemctl enable --now qqbot          # 开机自启 + 立即启动
+#   sudo systemctl enable --now qqbot-agent     # 开机自启 + 立即启动
 #
 # 常用命令：
-#   sudo systemctl status qqbot                 # 查看状态
-#   sudo journalctl -u qqbot -f                 # 实时看日志
-#   sudo systemctl restart qqbot                # 改完代码重新编译后重启
-#   sudo systemctl stop qqbot                   # 优雅停止（发 SIGINT）
+#   systemctl status qqbot-agent                 # 查看状态（免 sudo）
+#   journalctl -u qqbot-agent -f                 # 实时看日志（免 sudo）
+#   sudo systemctl restart qqbot-agent           # 改完代码重新编译后重启
+#   sudo systemctl stop qqbot-agent              # 优雅停止（发 SIGINT）
 #
-# 注意：改了代码后要先重新编译再重启：
-#   go build -o qqbot . && sudo systemctl restart qqbot
-# （开发期可用 air 热重载；这个服务用于长期后台运行。）
+# 注意：
+#   - 改完代码要先编译再重启：go build -o qqbot . && sudo systemctl restart qqbot-agent
+#   - 有单实例锁（data/bot.pid）：不要同时用 air / build-run.sh 手动跑，会抢锁
+#     导致本服务反复「拒绝重复启动」崩溃重启（见 AGENTS.md）。
 
 [Unit]
-Description=QQ Bot (NapCat / qqbot)
+Description=qqbot-agent (QQ agent bot)
 After=network-online.target
 Wants=network-online.target
 
 [Service]
+User=admin
 Type=simple
-User=admins
 # 工作目录指向项目根，bot 启动时会读取这里的 .env
-WorkingDirectory=/home/1944876825/projects/qqbot
-ExecStart=/home/1944876825/projects/qqbot/qqbot
+WorkingDirectory=/opt/1panel/www/sites/qiqi.prizen.cn/golang/qqbot
+ExecStart=/opt/1panel/www/sites/qiqi.prizen.cn/golang/qqbot/qqbot
 
 # 进程异常退出/崩溃后自动重启（systemctl stop 是主动停止，不会触发重启）
 Restart=always
-RestartSec=3
+RestartSec=5
 
-# 优雅停止：先发 SIGINT（bot 会优雅断开 WebSocket），10s 后仍未退出才 SIGKILL
+# 优雅停止：先发 SIGINT（bot 会优雅断开 WebSocket），超时仍未退出才 SIGKILL
 KillSignal=SIGINT
-TimeoutStopSec=10
+TimeoutStopSec=15
 
-# 日志走 journald，用 journalctl -u qqbot 查看
+# 日志走 journald，用 journalctl -u qqbot-agent 查看
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=qqbot
 
-# 轻量加固（可选，按需开启更多）
+# 轻量加固
 NoNewPrivileges=true
 
 [Install]

@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/tencent-connect/botgo/dto"
+	"qqbot/pkg/botgo/dto"
 )
 
 func TestIsImageAttachment(t *testing.T) {

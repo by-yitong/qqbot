@@ -45,7 +45,8 @@ func (p *TasksPlugin) Install(b *bot.Bot) {
 	}
 	b.Command("task", p.cmd).
 		Desc("管理定时任务（list 列表 / del 删除 / on|off 开关 / run 立即试跑；创建直接对话，如「每天8点发新闻摘要」）").
-		Alias("任务")
+		Alias("任务").
+		Category(bot.CatTask)
 }
 
 // taskSessionKey 是 agent 任务的专属会话 key：跨次执行共享上下文（能记住之前发过
@@ -111,11 +112,22 @@ func (p *TasksPlugin) cmd(c *bot.Ctx) {
 			c.ReplyText("还没有定时任务。创建直接跟我说，比如「每天早上8点给我发一条新闻摘要」")
 			return
 		}
-		lines := make([]string, 0, len(tasks))
+		// 每个任务行尾挂 试跑/开关/删除 内嵌指令标签（点击填入输入框），
+		// ID 不用手打；频道与 markdown 降级时是纯文本行。
+		var md, plain strings.Builder
 		for _, t := range tasks {
-			lines = append(lines, tools.DescribeTask(t))
+			line := tools.DescribeTask(t)
+			plain.WriteString(line + "\n")
+			op, opCmd := "停用", "off"
+			if !t.Enabled {
+				op, opCmd = "启用", "on"
+			}
+			md.WriteString(line + "  " +
+				bot.CmdInputTag("task run "+t.ID, "试跑") +
+				bot.CmdInputTag("task "+opCmd+" "+t.ID, op) +
+				bot.CmdInputTag("task del "+t.ID, "删除") + "\n")
 		}
-		c.ReplyText(strings.Join(lines, "\n"))
+		c.ReplyTaggedOrPlain(md.String(), plain.String())
 
 	case "del", "rm", "删除":
 		id := strings.TrimSpace(c.Args.Get(1))

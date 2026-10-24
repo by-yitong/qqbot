@@ -23,7 +23,7 @@ func NewSystem() *System {
 
 // Install 注册命令。
 func (p *System) Install(b *bot.Bot) {
-	b.Command("状态", p.run).Desc("查看服务器状态").Alias("服务器状态", "status", "server")
+	b.Command("状态", p.run).Desc("查看服务器状态").Alias("服务器状态", "status", "server").Category(bot.CatGeneral)
 }
 
 func (p *System) run(c *bot.Ctx) {

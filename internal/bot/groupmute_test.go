@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/tencent-connect/botgo/dto"
+	"qqbot/pkg/botgo/dto"
 )
 
 // muteSrv 假 QQ API：记录 restrict_chat_setting 调用。
@@ -33,10 +33,7 @@ func TestGroupMuteAPIs(t *testing.T) {
 	s := &muteSrv{}
 	srv := httptest.NewServer(http.HandlerFunc(s.handler))
 	t.Cleanup(srv.Close)
-	old := qqAPIBase
-	qqAPIBase = srv.URL
-	t.Cleanup(func() { qqAPIBase = old })
-	b := &Bot{tokenSource: &fakeTS{tok: "tok"}, appID: "APP"}
+	b := testBot(t, srv)
 
 	// 禁言：op=add + RFC3339 到期时间
 	expire := time.Now().Add(10 * time.Minute).Truncate(time.Second)
@@ -91,6 +88,7 @@ func TestGroupMuteAPIs(t *testing.T) {
 // TestGetGroupMuteState 查询群禁言状态：全员禁言规则 + 禁言中成员名单。
 func TestGetGroupMuteState(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
 		if r.Method != http.MethodGet || !strings.HasSuffix(r.URL.Path, "/restrict_chat_setting") {
 			http.NotFound(w, r)
 			return
@@ -101,10 +99,7 @@ func TestGetGroupMuteState(t *testing.T) {
 			`"members":[{"member_openid":"M1","mute_expire_at":"2026-09-03T12:00:00+08:00","username":"小明","union_openid":"U1"}]}`))
 	}))
 	t.Cleanup(srv.Close)
-	old := qqAPIBase
-	qqAPIBase = srv.URL
-	t.Cleanup(func() { qqAPIBase = old })
-	b := &Bot{tokenSource: &fakeTS{tok: "tok"}, appID: "APP"}
+	b := testBot(t, srv)
 
 	st, err := b.GetGroupMuteState(context.Background(), "G1")
 	if err != nil {

@@ -13,6 +13,7 @@
 - **收图**：用户在群/私聊发图片，bot 从消息附件（`attachments`）取出图片 URL 注入 agent 输入（`[用户发送了N张图片，URL：...]`），AI 据此拿到 URL（可用于图生图等）。⚠️ 两点诚实说明：① QQ 图片 URL（`multimedia.nt.qq.com.cn`）带 `rkey` 时效，外部服务能否直接抓取待真机验证，必要时需经 bot 下载中转/上图床；② AI 目前只拿到 URL、不具备「看」图能力（未接 vision 模型）。纯图片消息（无文本）也会进入 agent（不会被空文本过滤掉）。
 - **生图 + 图床**（`generate_image`）：`IMAGE_API_KEY` 配置后，AI 可文生图（`/images/generations`）/ 图生图（`/images/edits`，输入图可是 URL 或 `genimg:` 引用）。生图 API 常只回 base64（几十万字节，不能进 LLM 上下文），解码后**上传图床拿公网 URL**（本地也归档一份），AI 再调 `send_image` 发出。链路：`generate_image(prompt)` → 公网 URL → `send_image(url)` → QQ。详见下文「图床」一节。
 - **补充与打断**（参考 pi 的 steering，详见下文）：agent 处理是**异步**的（botgo 事件串行分发，同步跑会堵死后续消息）；处理中再 @bot 发消息＝**补充**（不打断，turn 边界并入当前处理）；`.stop` 停止当前处理；`.reset` 清空会话短期记忆；`.status` 看状态。
+- **长任务提示**：Run 超过 `AGENT_HINT_SEC`（默认 8s，0=关）还没结束，先回一条「⏳ 任务进行中」，任务结束自动**撤回**（群/私聊，官方撤回接口，窗口仅 2 分钟——超窗按 `AGENT_HINT_REFRESH_SEC`（默认 100s）滚动换新：发新撤旧，保证在屏提示始终可撤回；发送/撤回失败只记日志不影响任务）。见 plugins/progresshint.go。
 - **Token 用量统计**：每次 LLM 调用（含工具循环内的多次调用与压缩摘要）解析响应 `usage` 并计时，日志逐调用打一行（`[agent] tokens: 模型 输入1234 输出567 缓存命中1000(81%) 12.3s 46tok/s`），同时落记忆库；`.usage` 命令查**今日/累计**：调用次数、输入/输出/总 token、缓存命中率（网关不报则不显示，不瞎编）、平均输出速率。
 
 ## 图床（QQ 发图必需）

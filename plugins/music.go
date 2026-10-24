@@ -1,5 +1,5 @@
 // 点歌插件：接入 itapi.top 的 6 个音乐接口（搜索 + 取播放直链），统一成
-// 「搜索列表(≤6条) → 按钮选歌 → 发音频」的交互。
+// 「搜索列表(≤6条，内嵌指令标签点选) → 发音频」的交互。
 //
 // 音源与发送方式（itapi 返回的直链格式决定）：
 //
@@ -17,7 +17,7 @@
 //
 // 命令：.点歌 歌名（默认音源，.音源 可按聊天切换并落盘）；
 // .QQ点歌/.网易点歌/.酷我点歌/.酷我高音质点歌/.汽水点歌/.5sing点歌 指定音源；
-// 搜索唯一命中直接播放，多条则列表 + 按钮选歌；.选 序号（或按钮）取歌。
+// 搜索唯一命中直接播放，多条则歌单（qqbot-cmd-input 内嵌标签点选）；选 序号 取歌。
 package plugins
 
 import (
@@ -36,7 +36,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/tencent-connect/botgo/dto/keyboard"
 	"github.com/tidwall/gjson"
 
 	"qqbot/internal/bot"
@@ -194,28 +193,32 @@ func (p *Music) buildSources() []*musicSource {
 	}
 }
 
-// Install 注册命令。点歌/音源进指令面板；各音源变体与「选」是交互命令，只进 /help。
+// Install 注册命令。全部归「音乐」分类（.帮助 分组展示）；点歌/音源进指令面板；
+// 各音源变体与「选」是交互命令，只进 /help。
 func (p *Music) Install(b *bot.Bot) {
 	b.Command("点歌", p.cmdSong).
 		Desc("点歌：.点歌 歌名（默认音源，.音源 可切换；多于一条时 .选 序号 播放）").
-		Usage("<歌名>")
+		Usage("<歌名>").
+		Category(bot.CatMusic)
 	for _, s := range p.sources {
 		src := s
 		b.Command(src.Cmds[0], func(c *bot.Ctx) { p.cmdSongFrom(c, src) }).
 			Desc(src.Name + "点歌").
 			Usage("<歌名>").
-			HideBotMenu()
+			HideBotMenu().
+			Category(bot.CatMusic)
 		for _, alias := range src.Cmds[1:] {
-			b.Command(alias, func(c *bot.Ctx) { p.cmdSongFrom(c, src) }).Hidden().HideBotMenu()
+			b.Command(alias, func(c *bot.Ctx) { p.cmdSongFrom(c, src) }).Hidden().HideBotMenu().Category(bot.CatMusic)
 		}
 	}
 	b.Command("选", p.cmdPick).
 		Alias("选歌").
-		Desc("点歌出列表后按序号取歌（.选 2，或点列表按钮）").
-		RequireAtOrPrefix().
-		HideBotMenu()
+		Desc("点歌出列表后按序号取歌（点列表标签，或发送 选 2）").
+		HideBotMenu().
+		Category(bot.CatMusic)
 	b.Command("音源", p.cmdSource).
-		Desc("查看/切换本聊天的默认点歌音源（.音源 酷我 / .音源 重置）")
+		Desc("查看/切换本聊天的默认点歌音源（.音源 酷我 / .音源 重置）").
+		Category(bot.CatMusic)
 }
 
 // ---- 命令处理 ----
@@ -237,16 +240,16 @@ func (p *Music) cmdSongFrom(c *bot.Ctx, src *musicSource) {
 	})
 }
 
-// cmdPick .选 序号：从待选列表取歌。
+// cmdPick 选 序号：从待选列表取歌（列表标签点击填入的就是裸「选 N」）。
 func (p *Music) cmdPick(c *bot.Ctx) {
 	n, err := strconv.Atoi(strings.TrimSpace(c.Args.Get(0)))
 	if err != nil {
-		replyPlain(c, "用法：选 序号（如 选 1），序号见刚才的搜索列表")
-		return
+		return // 不是序号（如口癖「选一下」），安静忽略
 	}
 	pend := p.takePending(c)
 	if pend == nil {
-		replyPlain(c, "没有待选的歌曲（列表 10 分钟过期），先 .点歌 歌名")
+		// 无待选（列表过期/没搜过）也安静返回：标签误点/口癖不刷屏；
+		// 命令已消费该消息，不会漏给 AI 兜底。
 		return
 	}
 	if n < 1 || n > len(pend.entries) {
@@ -263,7 +266,7 @@ func (p *Music) cmdPick(c *bot.Ctx) {
 func (p *Music) cmdSource(c *bot.Ctx) {
 	arg := strings.TrimSpace(c.Args.Join())
 	if arg == "" {
-		replyPlain(c, p.sourceHelp(c))
+		c.ReplyTaggedOrPlain(p.sourceHelp(c, true), p.sourceHelp(c, false))
 		return
 	}
 	if arg == "重置" || strings.EqualFold(arg, "reset") {
@@ -273,28 +276,38 @@ func (p *Music) cmdSource(c *bot.Ctx) {
 	}
 	key := p.resolveKey(arg)
 	if key == "" {
-		replyPlain(c, "未知音源「"+arg+"」\n"+p.sourceHelp(c))
+		replyPlain(c, "未知音源「"+arg+"」\n"+p.sourceHelp(c, false))
 		return
 	}
 	p.setChatSource(c, key)
 	replyPlain(c, "本聊天默认音源已切换为："+p.sourceByKey(key).Name+"（重启保留，.音源 重置 恢复默认）")
 }
 
-// sourceHelp .音源 的说明文本。
-func (p *Music) sourceHelp(c *bot.Ctx) string {
+// sourceHelp .音源 的说明文本。tagged=true 时音源名/直接点歌/重置都是内嵌指令
+// 标签（点击填入输入框）；false 为纯文本（频道与 markdown 降级用）。
+func (p *Music) sourceHelp(c *bot.Ctx, tagged bool) string {
 	var b strings.Builder
 	cur := p.sourceFor(c)
 	b.WriteString("当前音源：" + cur.Name + "（" + cur.Key + "）\n可用音源：\n")
 	for _, s := range p.sources {
-		b.WriteString("• " + s.Key + " / " + s.Name + " — " + s.Note + "\n")
+		if tagged {
+			b.WriteString("• " + bot.CmdInputTag("音源 "+s.Key, s.Name) + " — " + s.Note +
+				"  " + bot.CmdInputTag(s.Cmds[0]+" ", "直接点歌→") + "\n")
+		} else {
+			b.WriteString("• " + s.Key + " / " + s.Name + " — " + s.Note + "\n")
+		}
 	}
-	b.WriteString("切换：.音源 <名称>（对本聊天生效，重启保留）｜重置：.音源 重置")
+	if tagged {
+		b.WriteString("点音源名切换默认（对本聊天生效，重启保留）｜" + bot.CmdInputTag("音源 重置", "重置为默认"))
+	} else {
+		b.WriteString("切换：.音源 <名称>（对本聊天生效，重启保留）｜重置：.音源 重置")
+	}
 	return b.String()
 }
 
 // ---- 搜索与播放流程 ----
 
-// searchAndShow 搜索并展示：唯一命中直接播，多条则出「列表 + 按钮」合一条消息。
+// searchAndShow 搜索并展示：唯一命中直接播，多条则出歌单（内嵌指令标签点选）。
 func (p *Music) searchAndShow(ctx context.Context, c *bot.Ctx, src *musicSource, keyword string) error {
 	entries, err := src.search(ctx, keyword)
 	if err != nil {
@@ -308,6 +321,16 @@ func (p *Music) searchAndShow(ctx context.Context, c *bot.Ctx, src *musicSource,
 	}
 	p.storePending(c, &musicPending{src: src, keyword: keyword, entries: entries, expires: time.Now().Add(musicPendTTL)})
 
+	// 群聊/私聊：歌单每行用官方内嵌指令标签（点击把「选 N」插入输入框，用户补发送）；
+	// 频道与 markdown 被拒发时降级纯文本（见 ReplyTaggedOrPlain）。
+	c.ReplyTaggedOrPlain(musicListText(src, keyword, entries, true), musicListText(src, keyword, entries, false))
+	return nil
+}
+
+// musicListText 生成歌单文本。tagged=true 时每首歌用内嵌指令标签包裹（show 是
+// 用户看到的整行文字）；tagged=false 为纯文本（频道与 markdown 降级用——标签在
+// 纯文本里就是乱码）。
+func musicListText(src *musicSource, keyword string, entries []musicEntry, tagged bool) string {
 	var b strings.Builder
 	b.WriteString(fmt.Sprintf("🎵 「%s」%s 搜索到 %d 条：\n", keyword, src.Name, len(entries)))
 	for i, e := range entries {
@@ -315,20 +338,18 @@ func (p *Music) searchAndShow(ctx context.Context, c *bot.Ctx, src *musicSource,
 		if e.Extra != "" {
 			line += " [" + e.Extra + "]"
 		}
-		b.WriteString(line + "\n")
-	}
-	b.WriteString("点下方按钮，或 @我 发送「选 序号」")
-	// 列表文本 + 选歌按钮合成一条 markdown 消息（按钮挂在消息底部）；
-	// markdown 被语料审核拒发时降级纯文本（按钮丢失，文字提示仍可 .选 N）。
-	if raw, err := bot.MarshalKeyboard(p.songKeyboard(entries)); err == nil {
-		if _, err := c.ReplyMarkdownKeyboard(b.String(), raw); err == nil {
-			return nil
+		if tagged {
+			b.WriteString(bot.CmdInputTag(fmt.Sprintf("选 %d", i+1), line) + "\n")
 		} else {
-			log.Printf("[music] 列表+按钮发送失败，降级纯文本: %v", err)
+			b.WriteString(line + "\n")
 		}
 	}
-	replyPlain(c, b.String())
-	return nil
+	if tagged {
+		b.WriteString("点歌名标签选歌（或发送「选 序号」）")
+	} else {
+		b.WriteString("发送「选 序号」选歌（如 选 1），列表 10 分钟内有效")
+	}
+	return b.String()
 }
 
 // musicIntro 生成歌曲介绍文本：md 版用 ![图片](url) 内嵌封面（介绍+封面一条消息，
@@ -397,36 +418,6 @@ func (p *Music) sendAudio(ctx context.Context, c *bot.Ctx, track *musicTrack) er
 	}
 	_, err := c.ReplyText("音频发送失败，直链（短期有效）：" + track.AudioURL)
 	return err
-}
-
-// songKeyboard 生成选歌按钮键盘：每行 3 个，点击自动 @机器人 发送「选 N」。
-func (p *Music) songKeyboard(entries []musicEntry) *keyboard.MessageKeyboard {
-	var rows []*keyboard.Row
-	for i := 0; i < len(entries); i += 3 {
-		row := &keyboard.Row{}
-		for j := i; j < i+3 && j < len(entries); j++ {
-			e := entries[j]
-			label := fmt.Sprintf("%d %s·%s", j+1, musicTrunc(e.Title, 7), musicTrunc(e.Singer, 5))
-			row.Buttons = append(row.Buttons, &keyboard.Button{
-				ID: strconv.Itoa(j + 1),
-				RenderData: &keyboard.RenderData{
-					Label:        label,
-					VisitedLabel: "已选",
-					Style:        1,
-				},
-				Action: &keyboard.Action{
-					Type:       keyboard.ActionTypeAtBot,
-					Permission: &keyboard.Permission{Type: keyboard.PermissionTypAll},
-					Data:       fmt.Sprintf("选 %d", j+1),
-					Enter:      true,
-				},
-			})
-		}
-		rows = append(rows, row)
-	}
-	return &keyboard.MessageKeyboard{
-		Content: &keyboard.CustomKeyboard{Rows: rows, Style: &keyboard.KeyboardStyle{FontSize: "small"}},
-	}
 }
 
 // goMusic 异步执行音乐流程（搜索/取链可到几十秒，语音转码更久），
