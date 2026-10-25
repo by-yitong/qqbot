@@ -4,6 +4,8 @@ import (
 	"context"
 	"strings"
 	"testing"
+
+	"qqbot/pkg/botgo/dto"
 )
 
 func newTestBot() *Bot {
@@ -345,5 +347,42 @@ func TestOnGroupMessageIgnoresOtherBot(t *testing.T) {
 	// 旧事件无 bot 标记：无法判断，保持原行为（触发）
 	if !call("<@B2> /ping", `{"id":"B2","member_openid":"B2","username":"未知账号"}`) {
 		t.Error("缺 bot 标记的旧事件应保持原有触发行为")
+	}
+}
+
+// TestExtractMentionsAndMentionsAccessor fromMessage 组装的 Ctx.Mentions()：
+// 排除空 id；api 未就绪不排除任何人；已知自身 openid 后排除机器人自身。
+func TestExtractMentionsAndMentionsAccessor(t *testing.T) {
+	b := New(Config{})
+	m := &dto.Message{
+		Content: "禁言 <@M1> 10分钟",
+		Author:  &dto.User{ID: "U1", Username: "管理员"},
+		Mentions: []*dto.User{
+			{ID: "M1", Username: "小明"},
+			{ID: "", Username: "空id"}, // 跳过
+			{ID: "B1", Username: "机器人自己"},
+		},
+	}
+	c := b.fromMessage(context.Background(), "group", m, true)
+
+	// api 未就绪 → selfOpenID 为空 → 不排除任何 mention
+	ms := c.Mentions()
+	if len(ms) != 2 || ms[0].ID != "M1" || ms[0].Username != "小明" || ms[1].ID != "B1" {
+		t.Fatalf("Mentions()=%+v", ms)
+	}
+
+	// 自身 openid 已知（模拟 Me() 已缓存）→ 排除 B1
+	b.selfMu.Lock()
+	b.selfID = "B1"
+	b.selfMu.Unlock()
+	ms = c.Mentions()
+	if len(ms) != 1 || ms[0].ID != "M1" {
+		t.Fatalf("排除自身后 Mentions()=%+v", ms)
+	}
+
+	// 无 mentions → nil
+	c2 := b.fromMessage(context.Background(), "group", &dto.Message{Author: &dto.User{ID: "U1"}}, false)
+	if got := c2.Mentions(); len(got) != 0 {
+		t.Errorf("无 mentions 应为空，得到 %+v", got)
 	}
 }

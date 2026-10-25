@@ -24,7 +24,7 @@
 
 审批通过后新成员入群，会再触发入群欢迎——两个功能自动衔接。
 
-框架层（`internal/bot/groupevent.go` / `groupmanage.go`）：`b.OnGroupMemberAdd(h)` / `b.OnGroupJoinRequest(h)` 注册监听（处理器异步触发，不堵 botgo 串行分发）；`GROUP_MEMBER_ADD` 需要的 `GROUP_MEMBER_EVENT`（1<<24）intent 只在注册了监听器时才申请（未开通该权限的机器人带上会连不上 WSS）。`b.ApproveGroupJoinRequest`（同意/拒绝）与 `b.ListGroupJoinRequests`（拉取待处理列表）为对应 HTTP 接口封装；同批官方接口还有：`b.GetGroupInfo`（群基本信息）、`b.GetGroupBotState`（机器人群内状态；两者均为白名单接口，非白名单机器人返回 11253）、`b.ListGroupJoinApprovalStrategies`（入群自动审批策略列表——策略是机器人维度，路径不带群 id）。
+框架层（`internal/bot/groupevent.go` / `group.go`）：`b.OnGroupMemberAdd(h)` / `b.OnGroupJoinRequest(h)` 注册监听（处理器异步触发，不堵 botgo 串行分发）；`GROUP_MEMBER_ADD` 需要的 `GROUP_MEMBER_EVENT`（1<<24）intent 只在注册了监听器时才申请（未开通该权限的机器人带上会连不上 WSS）。`b.ApproveGroupJoinRequest`（同意/拒绝）与 `b.ListGroupJoinRequests`（拉取待处理列表）为对应 HTTP 接口封装；同批官方接口还有：`b.GetGroupInfo`（群基本信息）、`b.GetGroupBotState`（机器人群内状态；两者均为白名单接口，非白名单机器人返回 11253）、`b.ListGroupJoinApprovalStrategies`（入群自动审批策略列表——策略是机器人维度，路径不带群 id）。
 
 相关 env（`.env.example` 有完整注释）：
 
@@ -41,7 +41,7 @@ JOIN_ADMINS=                           # 「审批」命令允许的 openid（�
 
 ## 群成员禁言
 
-官方 2026-08 新增的成员禁言接口 `POST /v2/groups/{group_openid}/restrict_chat_setting`（botgo v0.2.1 未覆盖，本项目自行封装于 `internal/bot/groupmute.go`；同路径 GET 可查询群禁言状态——`b.GetGroupMuteState` 返回全员禁言规则（none/always/schedule + 定时/周期规则）与当前禁言中的成员名单（含昵称，不含已过期））：
+官方 2026-08 新增的成员禁言接口 `POST /v2/groups/{group_openid}/restrict_chat_setting`（botgo v0.2.1 未覆盖，本项目自行封装于 `internal/bot/group.go` 禁言段；同路径 GET 可查询群禁言状态——`b.GetGroupMuteState` 返回全员禁言规则（none/always/schedule + 定时/周期规则）与当前禁言中的成员名单（含昵称，不含已过期））：
 
 - **命令**（`plugins/mute.go`，默认启用，`MUTE_ENABLE=0` 可关闭）：
   - **仅主人可用**（`OwnerOnly`，即 `BOT_OWNERS` 配置的 openid；fail-closed，未配置主人时无人可用）——禁言是惩戒性操作，不放开给普通群成员；
@@ -57,7 +57,7 @@ MUTE_GROUPS=                           # 限定群 openid（空=全部）
 
 ## 群成员管理与群黑名单
 
-官方 2026-09 新增的成员列表/详情/批量移除/黑名单接口（botgo v0.2.1 未覆盖，本项目自行封装于 `internal/bot/groupmember.go`）。**五个接口均为内邀白名单机制**：非白名单机器人返回错误码 11253（应用无接口访问权限，需联系平台运营申请）——未获接入前启用命令只会收到无权限报错，默认关闭。
+官方 2026-09 新增的成员列表/详情/批量移除/黑名单接口（botgo v0.2.1 未覆盖，本项目自行封装于 `internal/bot/group.go` 成员段）。**五个接口均为内邀白名单机制**：非白名单机器人返回错误码 11253（应用无接口访问权限，需联系平台运营申请）——未获接入前启用命令只会收到无权限报错，默认关闭。
 
 - **查询类命令**（开放给所有群成员）：
   - **`/成员`** 群成员概览：人数构成（群主/管理员/成员/机器人）、群主与管理员昵称、成员昵称前 30 个（`/成员 关键词` 按昵称子串搜索，`/成员 @某人` 看单个成员详情——角色、入群时间、完整 openid）；
