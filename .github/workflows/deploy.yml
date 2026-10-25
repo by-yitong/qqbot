@@ -32,8 +32,8 @@ jobs:
   check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
       - name: go build + vet
@@ -56,7 +56,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0 # push 需要完整历史（仓库小，代价可忽略）
       - name: 写入部署私钥
@@ -64,6 +64,7 @@ jobs:
           KEY: ${{ secrets.DEPLOY_SSH_KEY }}
         run: |
           [ -n "$KEY" ] || { echo "缺少 secret: DEPLOY_SSH_KEY"; exit 1; }
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
           install -m 600 /dev/null ~/.ssh/id_ed25519
           printf '%s\n' "$KEY" > ~/.ssh/id_ed25519
       - name: 部署（推代码到生产机 → build-run.sh）
