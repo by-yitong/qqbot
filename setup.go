@@ -238,8 +238,8 @@ func setupAgent(b *bot.Bot, mem *memory.Store, imgbedCli *imgbed.Client, imgbedM
 			time.Duration(utils.EnvInt("AGENT_HINT_SEC", 8))*time.Second,
 			time.Duration(utils.EnvInt("AGENT_HINT_REFRESH_SEC", 100))*time.Second))
 
-	// 短视频解析（注册在 Agent 之前：命中分享链接即 Abort，不触发 AI 兜底）。
-	b.UsePlugin(plugins.NewVideo(imgHost))
+	// AI 兜底是监听链末端的消费者：截流插件（短视频解析等）已在 main.go 里
+	// 于 setupAgent 之前注册（命中链接即 Abort），才能拦在兜底前面。
 	b.UsePlugin(agentPlug)
 	// 会话管理命令（.stop/.reset/.status/.usage/.mcp/.skill）。
 	b.UsePlugin(plugins.NewSession(ag, os.Getenv("AI_MODEL"), agentPlug.ResetMarker, mem))

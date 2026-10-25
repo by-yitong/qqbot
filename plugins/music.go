@@ -232,7 +232,7 @@ func (p *Music) cmdSong(c *bot.Ctx) {
 func (p *Music) cmdSongFrom(c *bot.Ctx, src *musicSource) {
 	keyword := strings.TrimSpace(c.Args.Join())
 	if keyword == "" {
-		replyPlain(c, "用法："+c.Args.Name+" 歌名\n当前音源："+p.sourceFor(c).Name+"（.音源 可切换）")
+		replyBestEffort(c, "用法："+c.Args.Name+" 歌名\n当前音源："+p.sourceFor(c).Name+"（.音源 可切换）")
 		return
 	}
 	p.goMusic(c, src, func(ctx context.Context) error {
@@ -253,7 +253,7 @@ func (p *Music) cmdPick(c *bot.Ctx) {
 		return
 	}
 	if n < 1 || n > len(pend.entries) {
-		replyPlain(c, fmt.Sprintf("序号超出范围（1~%d）", len(pend.entries)))
+		replyBestEffort(c, fmt.Sprintf("序号超出范围（1~%d）", len(pend.entries)))
 		return
 	}
 	e := pend.entries[n-1]
@@ -271,16 +271,16 @@ func (p *Music) cmdSource(c *bot.Ctx) {
 	}
 	if arg == "重置" || strings.EqualFold(arg, "reset") {
 		p.setChatSource(c, "")
-		replyPlain(c, "已恢复默认音源："+p.sourceFor(c).Name)
+		replyBestEffort(c, "已恢复默认音源："+p.sourceFor(c).Name)
 		return
 	}
 	key := p.resolveKey(arg)
 	if key == "" {
-		replyPlain(c, "未知音源「"+arg+"」\n"+p.sourceHelp(c, false))
+		replyBestEffort(c, "未知音源「"+arg+"」\n"+p.sourceHelp(c, false))
 		return
 	}
 	p.setChatSource(c, key)
-	replyPlain(c, "本聊天默认音源已切换为："+p.sourceByKey(key).Name+"（重启保留，.音源 重置 恢复默认）")
+	replyBestEffort(c, "本聊天默认音源已切换为："+p.sourceByKey(key).Name+"（重启保留，.音源 重置 恢复默认）")
 }
 
 // sourceHelp .音源 的说明文本。tagged=true 时音源名/直接点歌/重置都是内嵌指令
@@ -394,7 +394,7 @@ func (p *Music) play(ctx context.Context, c *bot.Ctx, src *musicSource, keyword 
 	md, plain := musicIntro(src, track)
 	if _, err := c.ReplyMarkdown(md); err != nil {
 		log.Printf("[music] 介绍 markdown 发送失败，降级纯文本: %v", err)
-		replyPlain(c, plain)
+		replyBestEffort(c, plain)
 	}
 	return p.sendAudio(ctx, c, track)
 }
@@ -433,7 +433,7 @@ func (p *Music) goMusic(c *bot.Ctx, src *musicSource, fn func(ctx context.Contex
 		defer cancel()
 		if err := fn(ctx); err != nil {
 			log.Printf("[music] %s 失败: %v", src.Name, err)
-			replyPlain(c, "点歌失败："+truncStr(err.Error(), 150))
+			replyBestEffort(c, "点歌失败："+truncStr(err.Error(), 150))
 		}
 	}()
 }

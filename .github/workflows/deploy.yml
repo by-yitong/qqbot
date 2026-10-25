@@ -1,0 +1,88 @@
+# 自动部署：push 到 master → CI 门禁 → runner 把代码推到生产机并上线。
+#
+# 方向说明：生产机在墙内，实测 `git fetch` GitHub（HTTPS）被掐（GnuTLS -110），
+# 所以不是「生产机自己拉」，而是墙外的 runner 直接把 master push 到生产仓
+# （生产仓已设 receive.denyCurrentBranch=updateInstead，工作树随 push 原地更新），
+# 再 SSH 执行 build-run.sh（编译失败不动线上服务，重启后确认 active）。
+#
+# GitHub 仓库 Secrets（均已配置）：
+#   DEPLOY_SSH_HOST  生产服务器（qiqi.prizen.cn）
+#   DEPLOY_SSH_USER  SSH 用户（admin，跑 bot 的用户）
+#   DEPLOY_SSH_KEY   部署专用私钥（公钥已装在生产机 admin 的 authorized_keys）
+#   DEPLOY_SSH_PORT  SSH 端口（可选，默认 22）
+#
+# 安全护栏：生产仓工作区有未提交改动时拒绝部署（updateInstead 也会拒，这里给出
+# 可读原因）；生产仓有未同步的本地提交（如 selfdev 产物）时 push 天然被拒
+# （非 fast-forward），不会强推。
+
+name: deploy
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch: {}
+
+# 连续 push 排队部署，不并发（后一次会同步到更新的 master）。
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+jobs:
+  # 门禁：与 AGENTS.md「提交前验证」同款四件套，任一失败不上线。
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: go build + vet
+        run: go build ./... && go vet ./...
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "以下文件未过 gofmt："
+            echo "$unformatted"
+            exit 1
+          fi
+      - name: go test
+        run: go test ./...
+
+  # 部署：推 master 到生产仓 → build-run.sh。
+  deploy:
+    needs: check
+    if: github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # push 需要完整历史（仓库小，代价可忽略）
+      - name: 写入部署私钥
+        env:
+          KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+        run: |
+          [ -n "$KEY" ] || { echo "缺少 secret: DEPLOY_SSH_KEY"; exit 1; }
+          install -m 600 /dev/null ~/.ssh/id_ed25519
+          printf '%s\n' "$KEY" > ~/.ssh/id_ed25519
+      - name: 部署（推代码到生产机 → build-run.sh）
+        env:
+          HOST: ${{ secrets.DEPLOY_SSH_HOST }}
+          PORT: ${{ secrets.DEPLOY_SSH_PORT || '22' }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_SSH_USER }}
+          REPO: /opt/1panel/www/sites/qiqi.prizen.cn/golang/qqbot
+        run: |
+          [ -n "$HOST" ] && [ -n "$DEPLOY_USER" ] \
+            || { echo "缺少 secret: DEPLOY_SSH_HOST / DEPLOY_SSH_USER"; exit 1; }
+          SSH="ssh -i $HOME/.ssh/id_ed25519 -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -p $PORT"
+          # 1) 前置检查：生产仓工作区脏则拒绝（防止 updateInstead 拒推时报错难懂）
+          if ! $SSH "$DEPLOY_USER@$HOST" "cd '$REPO' && [ -z \"\$(git status --porcelain)\" ]"; then
+            echo "生产仓库有未提交改动，拒绝部署（人工处理后再触发）"
+            exit 1
+          fi
+          # 2) 推代码：fast-forward 语义兜底——生产仓有未同步提交时这里会失败
+          export GIT_SSH_COMMAND="ssh -i $HOME/.ssh/id_ed25519 -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
+          git push "ssh://$DEPLOY_USER@$HOST:$PORT$REPO" master
+          # 3) 编译 + 重启 + 确认 active
+          $SSH "$DEPLOY_USER@$HOST" "cd '$REPO' && ./scripts/build-run.sh && echo '部署完成:' \$(git log -1 --oneline)"

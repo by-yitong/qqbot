@@ -8,7 +8,34 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"qqbot/internal/bot"
 )
+
+// TestVideoOnMessageAbortsShareLink 截流契约：命中分享链接的消息 Abort
+// （注册在其后的监听器——AI 兜底——不再执行），非链接消息原样放行。
+// 链上 Abort 短路语义见 internal/bot 的 TestAbortStopsListeners；
+// 装配顺序（Recorder → Video → Agent）由 main.go 的注释钉住。
+func TestVideoOnMessageAbortsShareLink(t *testing.T) {
+	p := NewVideo(nil)
+	// 解析 API 指向本地死端口：后台 goroutine 秒失败，测试不触外网。
+	p.ly = &LuoyingClient{Base: "http://127.0.0.1:1", APIKey: "k",
+		Backoff: time.Millisecond, HTTP: &http.Client{Timeout: time.Second}}
+	b := bot.New(bot.Config{})
+
+	c := bot.NewEventCtx(b, "group", "看看这个 https://v.douyin.com/4wZAPduuQ2c/ 复制此链接",
+		"U1", "小明", "G1", "M1", "", false)
+	p.onMessage(c)
+	if !c.Aborted() {
+		t.Error("分享链接应 Abort（截住 AI 兜底）")
+	}
+
+	plain := bot.NewEventCtx(b, "group", "普通聊天", "U1", "小明", "G1", "M2", "", false)
+	p.onMessage(plain)
+	if plain.Aborted() {
+		t.Error("非链接消息不应 Abort")
+	}
+}
 
 func TestShareLinkRE(t *testing.T) {
 	cases := []struct {

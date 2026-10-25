@@ -26,6 +26,13 @@ cd /opt/1panel/www/sites/qiqi.prizen.cn/golang/qqbot
 go build -o qqbot . && go test ./... && sudo systemctl restart qqbot-agent
 ```
 
+推送到 GitHub master 也会触发自动部署（`.github/workflows/deploy.yml`，Secrets 已配
+`DEPLOY_SSH_HOST/USER/KEY`）：CI 先跑提交前验证四件套（build/vet/gofmt/test），过了由
+runner 把 master **push 到生产仓**——生产机在墙内、自己拉 GitHub 不稳（GnuTLS 抖动），
+方向反转为 runner→生产；生产仓 `receive.denyCurrentBranch=updateInstead`，工作树随
+push 原地更新——再 SSH 执行 `build-run.sh`。生产仓工作区脏时拒绝部署；生产仓有未同步
+的本地提交（如 selfdev 产物）时 push 非 fast-forward 被拒，不会强推。
+
 - **重启必须走 systemctl**（或上面的脚本）。SIGINT 优雅停（15s 超时强杀），机器人会断开 WSS 再重连。
 - 看状态/日志（journalctl 免 sudo 可读）：
   ```bash

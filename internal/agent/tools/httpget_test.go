@@ -1,9 +1,30 @@
 package tools
 
-import "testing"
+import (
+	"errors"
+	"fmt"
+	"net"
+	"testing"
+)
 
-// TestAssertSafeURL 只用 IP 字面量与 host 匹配，不依赖真实 DNS，可在离线环境运行。
+// TestAssertSafeURL 只用 IP 字面量与 host 匹配；DNS 查询经 lookupIP 桩替换，
+// 不触网也不受环境 DNS（fake-ip 代理/运营商野解析）影响。
 func TestAssertSafeURL(t *testing.T) {
+	orig := lookupIP
+	defer func() { lookupIP = orig }()
+	lookupIP = func(host string) ([]net.IP, error) {
+		if ip := net.ParseIP(host); ip != nil {
+			return []net.IP{ip}, nil // IP 字面量原样返回（同 net.LookupIP）
+		}
+		switch host {
+		case "internal.svc":
+			return nil, errors.New("no such host") // 模拟不可解析
+		case "corp.example":
+			return []net.IP{net.ParseIP("192.168.1.1")}, nil // 解析到私网 IP
+		}
+		return nil, fmt.Errorf("测试未预期的 host: %s", host)
+	}
+
 	cases := []struct {
 		url     string
 		allow   []string
@@ -16,8 +37,9 @@ func TestAssertSafeURL(t *testing.T) {
 		{"http://192.168.1.1", nil, true},                        // 私网
 		{"http://10.0.0.1", nil, true},                           // 私网
 		{"http://169.254.1.1", nil, true},                        // 链路本地
-		{"http://internal.svc", []string{"internal.svc"}, false}, // allow 放行（host 直接匹配，不解析）
-		{"http://internal.svc", nil, true},                       // 未在 allow 且无法解析 → 报错
+		{"http://internal.svc", []string{"internal.svc"}, false}, // allow 放行（host 直接匹配，不走 DNS）
+		{"http://internal.svc", nil, true},                       // 未在 allow 且不可解析 → 报错
+		{"http://corp.example", nil, true},                       // 域名解析到私网 IP → 报错（真 SSRF 场景）
 	}
 	for _, c := range cases {
 		err := assertSafeURL(c.url, c.allow)

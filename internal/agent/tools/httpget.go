@@ -97,6 +97,10 @@ func assertSafeURL(raw string, allow []string) error {
 	return assertSafeHost(u.Hostname(), allow)
 }
 
+// lookupIP 默认 net.LookupIP；测试替换成桩避免依赖环境 DNS——fake-ip 代理或
+// 运营商野解析会给任意域名回公网 IP，让「不可解析→拒绝」用例在部分环境失真。
+var lookupIP = net.LookupIP
+
 // assertSafeHost 校验 host 解析到的是公网地址（SSRF 守卫，站长诊断工具共用）：
 // 回环/私网/链路本地等一律拒绝，allow 里的 host 显式放行；以 - 开头也拒绝
 // （防止被拼进 ping 等命令行参数造成选项注入）。
@@ -113,7 +117,7 @@ func assertSafeHost(host string, allow []string) error {
 			return nil
 		}
 	}
-	ips, err := net.LookupIP(host)
+	ips, err := lookupIP(host)
 	if err != nil {
 		return fmt.Errorf("域名解析失败: %w", err)
 	}

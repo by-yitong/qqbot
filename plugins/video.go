@@ -74,7 +74,7 @@ func (p *VideoPlugin) onMessage(c *bot.Ctx) {
 		defer cancel()
 		if err := p.handle(ctx, c, link); err != nil {
 			log.Printf("[video] %s 解析失败: %v", link, err)
-			replyPlain(c, "视频解析失败："+truncStr(err.Error(), 150))
+			replyBestEffort(c, "视频解析失败："+truncStr(err.Error(), 150))
 		}
 	}()
 }
@@ -118,7 +118,7 @@ func (p *VideoPlugin) handle(ctx context.Context, c *bot.Ctx, link string) error
 		return err
 	}
 
-	replyPlain(c, res.Summary()) // 简介先用纯文本（原生 md 群聊过审不稳，简介不值得赌）
+	replyBestEffort(c, res.Summary()) // md 优先，失败回落纯文本（官方保留 md 异步审核权，个别消息可能延迟）
 
 	switch {
 	case res.VideoURL != "":
@@ -127,7 +127,7 @@ func (p *VideoPlugin) handle(ctx context.Context, c *bot.Ctx, link string) error
 		n := 0
 		for i, u := range res.Images {
 			if i >= 10 {
-				replyPlain(c, fmt.Sprintf("…共 %d 张图，仅发前 10 张", len(res.Images)))
+				replyBestEffort(c, fmt.Sprintf("…共 %d 张图，仅发前 10 张", len(res.Images)))
 				break
 			}
 			if _, err := c.ReplyImage(u); err != nil {
@@ -251,7 +251,9 @@ func (v *VideoResult) Summary() string {
 
 // ---- 小工具 ----
 
-func replyPlain(c *bot.Ctx, s string) {
+// replyBestEffort 发文本：优先原生 markdown（本机器人群/私聊实测可发，菜单/点歌在用），
+// 失败回落纯文本——官方公域保留 md 异步审核权，个别消息可能延迟或被拒。
+func replyBestEffort(c *bot.Ctx, s string) {
 	if _, err := c.ReplyMarkdown(s); err != nil {
 		_, _ = c.ReplyText(s)
 	}
