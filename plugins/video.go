@@ -233,7 +233,11 @@ func (p *VideoPlugin) handle(ctx context.Context, c *bot.Ctx, link string) error
 		return err
 	}
 
-	replyBestEffort(c, res.Summary()) // md 优先，失败回落纯文本（官方保留 md 异步审核权，个别消息可能延迟）
+	// 原生 md 是主路径（含平台/清晰度/封面图）；官方保留异步审核权，被拒回落
+	// 纯文本简介（无封面图，其余信息都在）。
+	if _, err := c.ReplyMarkdown(res.SummaryMD()); err != nil {
+		_, _ = c.ReplyText(res.Summary())
+	}
 
 	switch {
 	case res.VideoURL != "":
@@ -316,12 +320,14 @@ func (p *VideoPlugin) download(ctx context.Context, url string) ([]byte, string,
 
 // VideoResult 是各解析源统一后的结果。
 type VideoResult struct {
+	Platform string // 平台名（抖音/快手），简介展示用
 	Title    string
 	Author   string
 	Like     int64
 	Comment  int64
 	Share    int64
 	VideoURL string
+	CoverURL string // 封面图（zhishuzhan 提供）；视频时经 md 内嵌到简介
 	Images   []string
 	Quality  string
 	SizeStr  string
@@ -332,6 +338,9 @@ type VideoResult struct {
 func (v *VideoResult) Summary() string {
 	var b strings.Builder
 	b.WriteString("🎬 ")
+	if v.Platform != "" {
+		b.WriteString("[" + v.Platform + "] ")
+	}
 	b.WriteString(oneLine(v.Title, 120))
 	b.WriteString("\n")
 	var meta []string
@@ -362,6 +371,16 @@ func (v *VideoResult) Summary() string {
 		b.WriteString(fmt.Sprintf("图集 %d 张\n", len(v.Images)))
 	}
 	return b.String()
+}
+
+// SummaryMD 渲染 markdown 简介（原生 md 是主路径）：在纯文本基础上内嵌封面图
+// （原生 md 的 ![图片](url) 语法，QQ 发送时会转存该图）。图集不嵌——后面会逐张发。
+func (v *VideoResult) SummaryMD() string {
+	s := v.Summary()
+	if v.VideoURL != "" && v.CoverURL != "" {
+		return s + fmt.Sprintf("![封面](%s)\n", v.CoverURL)
+	}
+	return s
 }
 
 // ---- 小工具 ----

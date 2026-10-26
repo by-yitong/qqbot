@@ -65,6 +65,7 @@ func TestZhishuzhanParseDouyinVideo(t *testing.T) {
 		return 200, `{"Code":200,"Msg":"请求成功","Data":{
 			"title":"宫崎骏的夏天","author":null,"isVideo":true,
 			"videoUrls":"https://dl.example/video.mp4",
+			"coverUrls":"https://cov.example/cover.jpg",
 			"lives":[],
 			"Formats":[
 				{"qualityNote":"最高画质","vext":"mp4","video":"https://test.daf0.cn/invite/index","audio":"","separate":0},
@@ -85,6 +86,16 @@ func TestZhishuzhanParseDouyinVideo(t *testing.T) {
 	if len(res.Images) != 0 {
 		t.Errorf("视频不应带图: %+v", res.Images)
 	}
+	if res.Platform != "抖音" || res.CoverURL != "https://cov.example/cover.jpg" {
+		t.Errorf("平台/封面映射不对: %+v", res)
+	}
+	md := res.SummaryMD()
+	if !strings.Contains(md, "[抖音]") || !strings.Contains(md, "![封面](https://cov.example/cover.jpg)") {
+		t.Errorf("md 简介应含平台标签与封面图: %s", md)
+	}
+	if strings.Contains(res.Summary(), "![封面]") {
+		t.Errorf("纯文本简介不应带 md 图片语法: %s", res.Summary())
+	}
 }
 
 // 快手图集：pics → Images，VideoURL 必须为空。
@@ -95,7 +106,8 @@ func TestZhishuzhanParseKuaishouGallery(t *testing.T) {
 		}
 		return 200, `{"Code":200,"Msg":"请求成功","Data":{
 			"title":"用你的快乐告诉我","isVideo":false,
-			"videoUrls":"","pics":["https://p.example/1.jpg","https://p.example/2.jpg","https://p.example/3.jpg"]}}`
+			"videoUrls":"","coverUrls":"https://cov.example/c.jpg",
+			"pics":["https://p.example/1.jpg","https://p.example/2.jpg","https://p.example/3.jpg"]}}`
 	})
 	defer srv.Close()
 	res, err := newZszTestClient(srv).Parse(context.Background(), "https://v.kuaishou.com/xyz")

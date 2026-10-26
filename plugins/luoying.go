@@ -92,16 +92,16 @@ type lyItem struct {
 
 // ParseDouyin 解析抖音分享链接，返回统一的 VideoResult。
 func (c *LuoyingClient) ParseDouyin(ctx context.Context, link string) (*VideoResult, error) {
-	return c.parse(ctx, "/api/douyin/info", link)
+	return c.parse(ctx, "/api/douyin/info", "抖音", link)
 }
 
 // ParseKuaishou 解析快手分享链接。
 func (c *LuoyingClient) ParseKuaishou(ctx context.Context, link string) (*VideoResult, error) {
-	return c.parse(ctx, "/api/kuaishou/info", link)
+	return c.parse(ctx, "/api/kuaishou/info", "快手", link)
 }
 
 // parse 只 fetch 一次（快速失败）；失败转移由 ParserChain 处理，不在源内重试。
-func (c *LuoyingClient) parse(ctx context.Context, path, link string) (*VideoResult, error) {
+func (c *LuoyingClient) parse(ctx context.Context, path, platform, link string) (*VideoResult, error) {
 	if c.APIKey == "" {
 		return nil, fmt.Errorf("未配置 LUOYING_API_KEY，解析接口不可用")
 	}
@@ -109,7 +109,9 @@ func (c *LuoyingClient) parse(ctx context.Context, path, link string) (*VideoRes
 	if err != nil {
 		return nil, err
 	}
-	return item.toResult(), nil
+	res := item.toResult()
+	res.Platform = platform
+	return res, nil
 }
 
 // fetch 调一次接口，任何失败立即返回错误（不重试）。

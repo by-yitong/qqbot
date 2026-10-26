@@ -129,7 +129,7 @@ func TestLuoyingParseDouyin(t *testing.T) {
 		t.Errorf("作者/清晰度不对: %+v", res)
 	}
 	s := res.Summary()
-	for _, want := range []string{"瞎看什么", "1080p", "NEVER GONNA GIVE YOU UP"} {
+	for _, want := range []string{"[抖音]", "瞎看什么", "1080p", "NEVER GONNA GIVE YOU UP"} {
 		if !strings.Contains(s, want) {
 			t.Errorf("简介缺 %q: %s", want, s)
 		}

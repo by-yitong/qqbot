@@ -94,8 +94,10 @@ func (c *ZhishuzhanClient) creds() (tokens, uid string) {
 // ErrUnsupportedPlatform，把机会让给链上的下一个源。
 func (c *ZhishuzhanClient) Parse(ctx context.Context, link string) (*VideoResult, error) {
 	switch {
-	case strings.Contains(link, "douyin.com"), strings.Contains(link, "kuaishou.com"):
-		return c.parse(ctx, link)
+	case strings.Contains(link, "douyin.com"):
+		return c.parse(ctx, "抖音", link)
+	case strings.Contains(link, "kuaishou.com"):
+		return c.parse(ctx, "快手", link)
 	default:
 		return nil, ErrUnsupportedPlatform
 	}
@@ -184,6 +186,7 @@ type zszData struct {
 	Title     string   `json:"title"`
 	IsVideo   bool     `json:"isVideo"`
 	VideoURLs string   `json:"videoUrls"`
+	CoverURLs string   `json:"coverUrls"`
 	Pics      []string `json:"pics"`
 	Formats   []struct {
 		QualityNote string `json:"qualityNote"`
@@ -197,7 +200,7 @@ type zszData struct {
 
 // parse 只调一次接口（快速失败）；重试/故障转移归 ParserChain，不在源内重试。
 // 检测到失效特征时照常把错误返回给链（该次失败照计），续期流程异步另行发起。
-func (c *ZhishuzhanClient) parse(ctx context.Context, link string) (*VideoResult, error) {
+func (c *ZhishuzhanClient) parse(ctx context.Context, platform, link string) (*VideoResult, error) {
 	tokens, uid := c.creds()
 	body, err := json.Marshal(struct {
 		PageUrl string `json:"PageUrl"`
@@ -244,7 +247,7 @@ func (c *ZhishuzhanClient) parse(ctx context.Context, link string) (*VideoResult
 	if err := json.Unmarshal(r.Data, &d); err != nil {
 		return nil, fmt.Errorf("解析结果格式异常: %w", err)
 	}
-	res := &VideoResult{Title: d.Title}
+	res := &VideoResult{Title: d.Title, Platform: platform, CoverURL: d.CoverURLs}
 	if d.IsVideo {
 		// 从 Formats 按清晰度选档（默认最高，ZHISHUZHAN_QUALITY 可设上限），
 		// 显示的 Quality 即选中那档；没有可用档位（缺 Formats/全是推广）回落
