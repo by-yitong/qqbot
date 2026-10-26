@@ -145,3 +145,26 @@ func emptyOr(s, fallback string) string {
 	}
 	return s
 }
+
+// ID 提供「/id」命令：查发送者自己的 openid / 群 openid——配置 BOT_OWNERS、
+// JOIN_ADMINS 等白名单时先用它拿 id。
+type ID struct{}
+
+// NewID 创建身份查询插件。
+func NewID() *ID { return &ID{} }
+
+// Install 注册命令。
+func (p *ID) Install(b *bot.Bot) {
+	b.Command("id", func(c *bot.Ctx) {
+		_, _ = c.ReplyText(idText(c))
+	}).Desc("查看自己的 openid（配置主人/白名单用）").HideBotMenu().Category(bot.CatGeneral)
+}
+
+// idText 拼回复文案：群消息带群 openid，私聊只有自己的。
+func idText(c *bot.Ctx) string {
+	out := "你的 openid：" + c.UserID()
+	if c.IsGroup() {
+		out += "\n本群 openid：" + c.GroupID()
+	}
+	return out
+}

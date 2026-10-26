@@ -2,10 +2,14 @@ package plugins
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -19,8 +23,8 @@ import (
 func TestVideoOnMessageAbortsShareLink(t *testing.T) {
 	p := NewVideo(nil)
 	// 解析 API 指向本地死端口：后台 goroutine 秒失败，测试不触外网。
-	p.ly = &LuoyingClient{Base: "http://127.0.0.1:1", APIKey: "k",
-		Backoff: time.Millisecond, HTTP: &http.Client{Timeout: time.Second}}
+	p.chain = NewParserChain(&LuoyingClient{Base: "http://127.0.0.1:1", APIKey: "k",
+		HTTP: &http.Client{Timeout: time.Second}})
 	b := bot.New(bot.Config{})
 
 	c := bot.NewEventCtx(b, "group", "看看这个 https://v.douyin.com/4wZAPduuQ2c/ 复制此链接",
@@ -34,6 +38,30 @@ func TestVideoOnMessageAbortsShareLink(t *testing.T) {
 	p.onMessage(plain)
 	if plain.Aborted() {
 		t.Error("非链接消息不应 Abort")
+	}
+}
+
+// TestVideoDefaultParserOrder 装配契约：默认序 zhishuzhan（默认启用、凭据可空）
+// 首选、luoying（配了 key 才在）备份；VIDEO_PARSERS 可重排/取子集。
+func TestVideoDefaultParserOrder(t *testing.T) {
+	names := func(p *VideoPlugin) []string {
+		var out []string
+		for _, x := range p.chain.parsers {
+			out = append(out, x.Name())
+		}
+		return out
+	}
+	t.Setenv("ZHISHUZHAN_SESSION_FILE", filepath.Join(t.TempDir(), "no-such.json"))
+	t.Setenv("ZHISHUZHAN_TOKENS", "")
+	t.Setenv("ZHISHUZHAN_USER_ID", "")
+	t.Setenv("LUOYING_API_KEY", "k")
+	t.Setenv("VIDEO_PARSERS", "")
+	if got := names(NewVideo(nil)); strings.Join(got, ",") != "zhishuzhan,luoying" {
+		t.Errorf("默认序应 zhishuzhan,luoying: %v", got)
+	}
+	t.Setenv("VIDEO_PARSERS", "luoying")
+	if got := names(NewVideo(nil)); strings.Join(got, ",") != "luoying" {
+		t.Errorf("VIDEO_PARSERS=luoying 应只剩 luoying: %v", got)
 	}
 }
 
@@ -89,7 +117,7 @@ func TestLuoyingParseDouyin(t *testing.T) {
 			"images":[]}}`
 	})
 	defer srv.Close()
-	c := &LuoyingClient{Base: srv.URL, APIKey: "test-key", Backoff: time.Millisecond, HTTP: srv.Client()}
+	c := &LuoyingClient{Base: srv.URL, APIKey: "test-key", HTTP: srv.Client()}
 	res, err := c.ParseDouyin(context.Background(), "https://v.douyin.com/O9lqomfBjaI/")
 	if err != nil {
 		t.Fatal(err)
@@ -116,7 +144,7 @@ func TestLuoyingParseDouyinGallery(t *testing.T) {
 			"images":["https://c/1.jpg","https://c/2.jpg","https://c/3.jpg"]}}`
 	})
 	defer srv.Close()
-	c := &LuoyingClient{Base: srv.URL, APIKey: "test-key", Backoff: time.Millisecond, HTTP: srv.Client()}
+	c := &LuoyingClient{Base: srv.URL, APIKey: "test-key", HTTP: srv.Client()}
 	res, err := c.ParseDouyin(context.Background(), "https://v.douyin.com/g/")
 	if err != nil {
 		t.Fatal(err)
@@ -139,7 +167,7 @@ func TestLuoyingParseKuaishou(t *testing.T) {
 			"videos":["https://js.example/play.mp4"]}}`
 	})
 	defer srv.Close()
-	c := &LuoyingClient{Base: srv.URL, APIKey: "test-key", Backoff: time.Millisecond, HTTP: srv.Client()}
+	c := &LuoyingClient{Base: srv.URL, APIKey: "test-key", HTTP: srv.Client()}
 	res, err := c.ParseKuaishou(context.Background(), "https://v.kuaishou.com/KPgjzK9F")
 	if err != nil {
 		t.Fatal(err)
@@ -149,50 +177,94 @@ func TestLuoyingParseKuaishou(t *testing.T) {
 	}
 }
 
-// 实测快手接口偶发 502「解析失败」，同链接重试即穿过——验证重试逻辑。
-func TestLuoyingRetryOn502(t *testing.T) {
-	srv := lyTestServer(t, "test-key", func(_ string, n int) (int, string) {
-		if n == 1 {
-			return 502, `{"code":502,"message":"Bad Gateway","error":"解析失败, 请检查关键字是否正确"}`
-		}
-		return 200, `{"code":200,"message":"OK","data":{"title":"ok","videos":["https://v/1.mp4"]}}`
+// 快速失败契约：502 恒定失败时只请求 1 次、立即报错——重试/故障转移交给 ParserChain。
+func TestLuoyingFastFailOn502(t *testing.T) {
+	var n int
+	srv := lyTestServer(t, "test-key", func(_ string, calls int) (int, string) {
+		n = calls
+		return 200, `{"code":502,"error":"解析失败, 请检查关键字是否正确"}`
 	})
 	defer srv.Close()
-	c := &LuoyingClient{Base: srv.URL, APIKey: "test-key", Backoff: time.Millisecond, HTTP: srv.Client()}
-	if _, err := c.ParseKuaishou(context.Background(), "https://v.kuaishou.com/x"); err != nil {
-		t.Fatalf("502 后重试应成功: %v", err)
+	c := &LuoyingClient{Base: srv.URL, APIKey: "test-key", HTTP: srv.Client()}
+	_, err := c.ParseKuaishou(context.Background(), "https://v.kuaishou.com/x")
+	if err == nil || !strings.Contains(err.Error(), "解析失败") {
+		t.Fatalf("502 应立即失败: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("快速失败应只请求 1 次，实际 %d 次", n)
 	}
 }
 
 func TestLuoyingErrPaths(t *testing.T) {
 	// 无 key。
-	c := &LuoyingClient{Backoff: time.Millisecond}
+	c := &LuoyingClient{}
 	if _, err := c.ParseDouyin(context.Background(), "https://v.douyin.com/x/"); err == nil || !strings.Contains(err.Error(), "LUOYING_API_KEY") {
 		t.Errorf("缺 key 应报错: %v", err)
 	}
-	// 业务失败且持续：重试耗尽后带上接口的错误信息。
+	// 业务失败：快速失败，错误信息带上接口的原始错误。
 	srv := lyTestServer(t, "k", func(_ string, _ int) (int, string) {
 		return 200, `{"code":502,"error":"解析失败, 请检查关键字是否正确"}`
 	})
 	defer srv.Close()
-	c2 := &LuoyingClient{Base: srv.URL, APIKey: "k", Backoff: time.Millisecond, HTTP: srv.Client()}
+	c2 := &LuoyingClient{Base: srv.URL, APIKey: "k", HTTP: srv.Client()}
 	if _, err := c2.ParseKuaishou(context.Background(), "https://v.kuaishou.com/x"); err == nil || !strings.Contains(err.Error(), "解析失败") {
 		t.Errorf("持续失败应透出接口错误: %v", err)
 	}
-	// 429：透出限频语义并遵守 retry_after。
+	// 429：快速返回并透出限频语义（不再有 retry_after 等待）。
 	var n int
-	srv2 := lyTestServer(t, "k", func(_ string, _ int) (int, string) {
-		n++
+	srv2 := lyTestServer(t, "k", func(_ string, calls int) (int, string) {
+		n = calls
 		return 429, `{"code":429,"error":"请求过于频繁","details":{"retry_after":1}}`
 	})
 	defer srv2.Close()
-	c3 := &LuoyingClient{Base: srv2.URL, APIKey: "k", Backoff: time.Millisecond, HTTP: srv2.Client()}
-	start := time.Now()
+	c3 := &LuoyingClient{Base: srv2.URL, APIKey: "k", HTTP: srv2.Client()}
 	if _, err := c3.ParseKuaishou(context.Background(), "https://v.kuaishou.com/x"); err == nil || !strings.Contains(err.Error(), "限频") {
 		t.Errorf("429 应报限频: %v", err)
 	}
-	if n < 2 || time.Since(start) < 900*time.Millisecond {
-		t.Errorf("429 应按 retry_after 等待后重试: n=%d elapsed=%s", n, time.Since(start))
+	if n != 1 {
+		t.Errorf("429 应快速返回只请求 1 次，实际 %d 次", n)
+	}
+}
+
+// TestLuoyingAsParser 验证 Parse 按链接域名分流：抖音/快手各打对应接口，
+// 其他域名返回 ErrUnsupportedPlatform（把机会让给链上的下一个源）。
+func TestLuoyingAsParser(t *testing.T) {
+	var mu sync.Mutex
+	var paths []string
+	srv := lyTestServer(t, "k", func(path string, _ int) (int, string) {
+		mu.Lock()
+		paths = append(paths, path)
+		mu.Unlock()
+		switch path {
+		case "/api/douyin/info":
+			return 200, `{"code":200,"message":"OK","data":{"title":"抖音视频","videos":["https://v/d.mp4"]}}`
+		case "/api/kuaishou/info":
+			return 200, `{"code":200,"message":"OK","data":{"title":"快手视频","videos":["https://v/k.mp4"]}}`
+		}
+		return 404, `{"code":404,"message":"Not Found"}`
+	})
+	defer srv.Close()
+	c := &LuoyingClient{Base: srv.URL, APIKey: "k", HTTP: srv.Client()}
+	if c.Name() != "luoying" {
+		t.Errorf("Name = %q, want luoying", c.Name())
+	}
+	res, err := c.Parse(context.Background(), "https://v.douyin.com/x/")
+	if err != nil || res.Title != "抖音视频" {
+		t.Errorf("抖音链接分流错误: %v %+v", err, res)
+	}
+	res, err = c.Parse(context.Background(), "https://v.kuaishou.com/y")
+	if err != nil || res.Title != "快手视频" {
+		t.Errorf("快手链接分流错误: %v %+v", err, res)
+	}
+	mu.Lock()
+	want := []string{"/api/douyin/info", "/api/kuaishou/info"}
+	got := paths
+	mu.Unlock()
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Errorf("请求路径 = %v, want %v", got, want)
+	}
+	if _, err := c.Parse(context.Background(), "https://example.com/x"); !errors.Is(err, ErrUnsupportedPlatform) {
+		t.Errorf("其他链接应返回 ErrUnsupportedPlatform: %v", err)
 	}
 }
 
@@ -255,5 +327,51 @@ func TestVideoConstants(t *testing.T) {
 	}
 	if maxProxyBytes != 200<<20 {
 		t.Error("中转上限被改动")
+	}
+}
+
+// TestVideoRetryAfterRelogin 扫码成功 → retryPending 自动重试失败链接：
+// 重试用原链接打到链上、去重键被清（手动重发也放行）、重试一次后 pending 清空。
+func TestVideoRetryAfterRelogin(t *testing.T) {
+	parsed := make(chan string, 4)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v2/parse/index" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		var body struct {
+			PageUrl string
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		parsed <- body.PageUrl
+		fmt.Fprint(w, `{"Code":200,"Msg":"OK","Data":{"title":"t","isVideo":true,"videoUrls":"https://dl/v.mp4"}}`)
+	}))
+	defer srv.Close()
+	zs := &ZhishuzhanClient{Base: srv.URL, Tokens: "t", UserID: "1", HTTP: srv.Client(),
+		sessionFile: filepath.Join(t.TempDir(), "s.json")}
+	p := &VideoPlugin{chain: NewParserChain(zs), zs: zs, client: &http.Client{Timeout: time.Second}}
+
+	link := "https://v.douyin.com/retry1/"
+	c := bot.NewEventCtx(bot.New(bot.Config{}), "group", "看 "+link, "U1", "小明", "G1", "M1", "", false)
+	p.claim(link) // 模拟首轮已处理过（占住去重键）
+	p.storePending(link, c)
+	p.retryPending()
+
+	select {
+	case got := <-parsed:
+		if got != link {
+			t.Errorf("重试应解析原链接: %q", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("重试未发起")
+	}
+	if !p.claim(link) { // 去重键已清：同链接手动重发能再次放行
+		t.Error("重试后去重键应被清除")
+	}
+	p.retryPending() // pending 已消费：再次触发无副作用
+	select {
+	case got := <-parsed:
+		t.Errorf("pending 已消费，不应再重试: %q", got)
+	case <-time.After(200 * time.Millisecond):
 	}
 }

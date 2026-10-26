@@ -1,11 +1,12 @@
-// luoying.work 视频解析 API 客户端（抖音/快手，2026-10 接入，替代直连/星之阁/zsz 方案）。
+// luoying.work 视频解析 API 客户端（抖音/快手，2026-10 接入，替代直连/星之阁/zsz 方案），
+// 以 Parser 身份接入 VideoPlugin 的解析链（plugins/videoparser.go）。
 //
 //	GET {base}/api/douyin/info?keyword=<分享短链>    Authorization: Bearer <key>
 //	GET {base}/api/kuaishou/info?keyword=<分享短链>
 //
 // 统一外层 {code, message, error, data}，code=200 成功。已知失败形态：
-// 429 限频（匿名组 1 次/分钟，details.retry_after 给出建议等待秒数）；
-// 502 上游解析抖动（实测快手偶发，同链接重试即穿过）。
+// 429 限频（匿名组 1 次/分钟）；502 上游解析抖动（实测快手偶发）。
+// 多源时代快速失败：fetch 一次失败直接返回错误，抖动重试与故障转移交给 ParserChain。
 package plugins
 
 import (
@@ -17,15 +18,15 @@ import (
 	"net/url"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
 // LuoyingClient 是 apiserver.luoying.work 解析客户端，并发安全（无状态）。
 type LuoyingClient struct {
-	Base    string // API 基址
-	APIKey  string // Bearer 鉴权 key
-	Backoff time.Duration
-	HTTP    *http.Client
+	Base   string // API 基址
+	APIKey string // Bearer 鉴权 key
+	HTTP   *http.Client
 }
 
 // NewLuoyingClient 从环境变量创建（LUOYING_API_BASE 可覆盖基址，LUOYING_API_KEY 必配）。
@@ -35,22 +36,43 @@ func NewLuoyingClient() *LuoyingClient {
 		base = "https://apiserver.luoying.work"
 	}
 	return &LuoyingClient{
-		Base:    base,
-		APIKey:  os.Getenv("LUOYING_API_KEY"),
-		Backoff: 2 * time.Second,
-		HTTP:    &http.Client{Timeout: 60 * time.Second},
+		Base:   base,
+		APIKey: os.Getenv("LUOYING_API_KEY"),
+		HTTP:   &http.Client{Timeout: 60 * time.Second},
 	}
+}
+
+// Name 实现 Parser 接口。
+func (c *LuoyingClient) Name() string { return "luoying" }
+
+// Parse 按链接域名分流平台，实现 Parser 接口；不认识的域名返回
+// ErrUnsupportedPlatform，把机会让给链上的下一个源。
+func (c *LuoyingClient) Parse(ctx context.Context, link string) (*VideoResult, error) {
+	switch {
+	case strings.Contains(link, "douyin.com"):
+		return c.ParseDouyin(ctx, link)
+	case strings.Contains(link, "kuaishou.com"):
+		return c.ParseKuaishou(ctx, link)
+	default:
+		return nil, ErrUnsupportedPlatform
+	}
+}
+
+// NewLuoyingParserFromEnv 从环境变量装配 luoying 解析源；未配 key 返回 nil
+// （orderParsers 会剔除 nil，装配处无需判空）。
+func NewLuoyingParserFromEnv() Parser {
+	if os.Getenv("LUOYING_API_KEY") == "" {
+		return nil
+	}
+	return NewLuoyingClient()
 }
 
 // lyResp 统一外层。
 type lyResp struct {
-	Code    int    `json:"code"`
-	Message string `json:"message"`
-	Error   string `json:"error"`
-	Details struct {
-		RetryAfter int `json:"retry_after"` // 429 建议等待秒数
-	} `json:"details"`
-	Data json.RawMessage `json:"data"`
+	Code    int             `json:"code"`
+	Message string          `json:"message"`
+	Error   string          `json:"error"`
+	Data    json.RawMessage `json:"data"`
 }
 
 // lyItem data 字段（抖音/快手共用；快手无 author/formats，图集无 videos）。
@@ -68,9 +90,6 @@ type lyItem struct {
 	} `json:"formats"`
 }
 
-// lyMaxAttempts 429/502 都可能是抖动，多试两轮；仍失败如实报错。
-const lyMaxAttempts = 3
-
 // ParseDouyin 解析抖音分享链接，返回统一的 VideoResult。
 func (c *LuoyingClient) ParseDouyin(ctx context.Context, link string) (*VideoResult, error) {
 	return c.parse(ctx, "/api/douyin/info", link)
@@ -81,53 +100,38 @@ func (c *LuoyingClient) ParseKuaishou(ctx context.Context, link string) (*VideoR
 	return c.parse(ctx, "/api/kuaishou/info", link)
 }
 
+// parse 只 fetch 一次（快速失败）；失败转移由 ParserChain 处理，不在源内重试。
 func (c *LuoyingClient) parse(ctx context.Context, path, link string) (*VideoResult, error) {
 	if c.APIKey == "" {
 		return nil, fmt.Errorf("未配置 LUOYING_API_KEY，解析接口不可用")
 	}
-	var lastErr error
-	for attempt := 1; ; attempt++ {
-		item, retryAfter, err := c.fetch(ctx, path, link)
-		if err == nil {
-			return item.toResult(), nil
-		}
-		lastErr = err
-		if attempt >= lyMaxAttempts {
-			break
-		}
-		wait := time.Duration(attempt) * c.Backoff
-		if retryAfter > 0 { // 429：按接口建议等，封顶 30s 免得回复拖太久
-			wait = min(time.Duration(retryAfter)*time.Second, 30*time.Second)
-		}
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case <-time.After(wait):
-		}
+	item, err := c.fetch(ctx, path, link)
+	if err != nil {
+		return nil, err
 	}
-	return nil, lastErr
+	return item.toResult(), nil
 }
 
-// fetch 调一次接口。返回 (结果, 429 建议等待秒数, 错误)。
-func (c *LuoyingClient) fetch(ctx context.Context, path, link string) (*lyItem, int, error) {
+// fetch 调一次接口，任何失败立即返回错误（不重试）。
+func (c *LuoyingClient) fetch(ctx context.Context, path, link string) (*lyItem, error) {
 	u := c.Base + path + "?keyword=" + url.QueryEscape(link)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
-		return nil, 0, err
+		return nil, err
 	}
 	req.Header.Set("Authorization", "Bearer "+c.APIKey)
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
-		return nil, 0, fmt.Errorf("请求解析接口失败: %w", err)
+		return nil, fmt.Errorf("请求解析接口失败: %w", err)
 	}
 	defer resp.Body.Close()
 	b, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
 	if err != nil {
-		return nil, 0, err
+		return nil, err
 	}
 	var r lyResp
 	if json.Unmarshal(b, &r) != nil {
-		return nil, 0, fmt.Errorf("解析接口响应异常（HTTP %d）: %s", resp.StatusCode, truncStr(string(b), 120))
+		return nil, fmt.Errorf("解析接口响应异常（HTTP %d）: %s", resp.StatusCode, truncStr(string(b), 120))
 	}
 	if r.Code != 200 {
 		msg := r.Error
@@ -135,18 +139,18 @@ func (c *LuoyingClient) fetch(ctx context.Context, path, link string) (*lyItem, 
 			msg = r.Message
 		}
 		if r.Code == http.StatusTooManyRequests {
-			return nil, r.Details.RetryAfter, fmt.Errorf("解析接口限频: %s", truncStr(msg, 80))
+			return nil, fmt.Errorf("解析接口限频: %s", truncStr(msg, 80))
 		}
-		return nil, 0, fmt.Errorf("解析失败（code=%d）: %s", r.Code, truncStr(msg, 120))
+		return nil, fmt.Errorf("解析失败（code=%d）: %s", r.Code, truncStr(msg, 120))
 	}
 	if len(r.Data) == 0 {
-		return nil, 0, fmt.Errorf("解析接口未返回数据")
+		return nil, fmt.Errorf("解析接口未返回数据")
 	}
 	var item lyItem
 	if err := json.Unmarshal(r.Data, &item); err != nil {
-		return nil, 0, fmt.Errorf("解析结果格式异常: %w", err)
+		return nil, fmt.Errorf("解析结果格式异常: %w", err)
 	}
-	return &item, 0, nil
+	return &item, nil
 }
 
 // toResult 映射为统一的 VideoResult。图集（images 非空）时清掉视频地址：

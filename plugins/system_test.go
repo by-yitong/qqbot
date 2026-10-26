@@ -3,6 +3,8 @@ package plugins
 import (
 	"strings"
 	"testing"
+
+	"qqbot/internal/bot"
 )
 
 func TestHumanSize(t *testing.T) {
@@ -40,5 +42,17 @@ func TestSystemRender(t *testing.T) {
 		if !strings.Contains(md, want) {
 			t.Errorf("render 缺少 %q", want)
 		}
+	}
+}
+
+func TestIDText(t *testing.T) {
+	b := bot.New(bot.Config{})
+	g := bot.NewEventCtx(b, "group", "", "U1", "小明", "G9", "M1", "", false)
+	if got := idText(g); got != "你的 openid：U1\n本群 openid：G9" {
+		t.Errorf("群消息: %q", got)
+	}
+	p := bot.NewEventCtx(b, "c2c", "", "U1", "小明", "", "M2", "", false)
+	if got := idText(p); got != "你的 openid：U1" {
+		t.Errorf("私聊: %q", got)
 	}
 }

@@ -131,6 +131,20 @@ func (b *Bot) IsOwner(userID string) bool {
 	return ok
 }
 
+// Owners 返回主人 openid 列表（排序保稳定；未配置返回 nil）。
+// owners 在 New 时定死、此后只读，无需加锁。
+func (b *Bot) Owners() []string {
+	if len(b.owners) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(b.owners))
+	for id := range b.owners {
+		out = append(out, id)
+	}
+	sort.Strings(out)
+	return out
+}
+
 // NC 返回底层 openapi.OpenAPI（需要直接调官方接口时用）。连接前为 nil。
 func (b *Bot) NC() openapi.OpenAPI { return b.api }
 

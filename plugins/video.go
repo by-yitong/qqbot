@@ -9,6 +9,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -31,17 +32,27 @@ const maxProxyBytes = 200 << 20
 
 // VideoPlugin 短视频解析插件。
 type VideoPlugin struct {
-	ly      *LuoyingClient // luoying 解析 API（抖音/快手）
-	imgHost *imgstore.Host
-	client  *http.Client // 下载视频直链用（独立于 resty，放宽超时）
+	chain    *ParserChain      // 多源解析链（按优先级故障转移，源定义见 videoparser.go/luoying.go/zhishuzhan.go）
+	zs       *ZhishuzhanClient // zhishuzhan 源引用（注入扫码续期通知用；默认启用，不为 nil）
+	notifier *chatNotifier     // 续期消息 → 触发解析的聊天（Install 时创建并注入 zs）
+	imgHost  *imgstore.Host
+	client   *http.Client // 下载视频直链用（独立于 resty，放宽超时）
 
 	mu sync.Map // link-hash -> 解析开始时间（去重）
+
+	pendMu   sync.Mutex // 护 pendLink/pendCtx
+	pendLink string     // 最近一条解析失败的链接（扫码续期成功后由 retryPending 重试）
+	pendCtx  *bot.Ctx   // 对应消息上下文（重试时重建发送锚点用）
 }
 
 // NewVideo 创建插件。imgHost 用于视频直链被 QQ 拉取失败时的图床中转。
 func NewVideo(imgHost *imgstore.Host) *VideoPlugin {
+	// 默认序：zhishuzhan 首选（默认启用、凭据可空，扫码登录自动引导，见 zhishuzhan.go），
+	// luoying 备份（未配 key 返回 nil，orderParsers 剔除）；VIDEO_PARSERS 可重排/取子集。
+	zs := NewZhishuzhanClientFromEnv()
 	return &VideoPlugin{
-		ly:      NewLuoyingClient(),
+		chain:   NewParserChain(orderParsers([]Parser{zs, NewLuoyingParserFromEnv()}, os.Getenv("VIDEO_PARSERS"))...),
+		zs:      zs,
 		imgHost: imgHost,
 		client:  &http.Client{Timeout: 4 * time.Minute},
 	}
@@ -49,9 +60,71 @@ func NewVideo(imgHost *imgstore.Host) *VideoPlugin {
 
 // Install 注册消息监听。
 func (p *VideoPlugin) Install(b *bot.Bot) {
+	if p.zs != nil {
+		p.notifier = &chatNotifier{b: b}
+		p.zs.SetNotifier(p.notifier)
+		p.zs.SetOnCredsRefreshed(p.retryPending) // 扫码成功 → 自动重试刚才失败的链接
+	}
 	h := func(c *bot.Ctx) { p.onMessage(c) }
 	b.OnGroupMessage(h)
 	b.OnPrivateMessage(h)
+}
+
+// chatNotifier 把扫码续期消息发到「触发解析的那条消息所在的聊天」（群里/私聊里
+// 直接出现二维码，谁都能扫）。流程最长 5 分钟，被动锚点会过期，统一用空锚点
+// 主动发送（群/私聊主动消息已开通，机制同 plugins/online.go）。
+type chatNotifier struct {
+	b *bot.Bot
+
+	mu                   sync.Mutex
+	src, groupID, userID string // 最近一条触发解析的消息来源（Target 每次命中链接时刷新）
+}
+
+// Target 记录续期消息的投递目标（onMessage 命中分享链接时调用，晚写覆盖）。
+func (n *chatNotifier) Target(c *bot.Ctx) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.src, n.groupID, n.userID = c.Source, c.GroupID(), c.UserID()
+}
+
+func (n *chatNotifier) SendText(ctx context.Context, text string) {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	n.mu.Lock()
+	src, gid, uid := n.src, n.groupID, n.userID
+	n.mu.Unlock()
+	switch src {
+	case "group":
+		if _, err := n.b.SendGroupText(ctx, gid, "", text); err != nil {
+			log.Printf("[video] 续期通知发群失败: %v", err)
+		}
+	case "c2c":
+		if _, err := n.b.SendC2CText(ctx, uid, "", text); err != nil {
+			log.Printf("[video] 续期通知发私聊失败: %v", err)
+		}
+	default:
+		log.Printf("[video] 续期通知无处可发（尚无触发聊天）：%s", truncStr(text, 60))
+	}
+}
+
+func (n *chatNotifier) SendImage(ctx context.Context, imageURL string) {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	n.mu.Lock()
+	src, gid, uid := n.src, n.groupID, n.userID
+	n.mu.Unlock()
+	switch src {
+	case "group":
+		if _, err := n.b.SendGroupImage(ctx, gid, "", imageURL); err != nil {
+			log.Printf("[video] 续期二维码发群失败: %v", err)
+		}
+	case "c2c":
+		if _, err := n.b.SendC2CImage(ctx, uid, "", imageURL); err != nil {
+			log.Printf("[video] 续期二维码发私聊失败: %v", err)
+		}
+	default:
+		log.Printf("[video] 续期二维码无处可发（尚无触发聊天）")
+	}
 }
 
 func (p *VideoPlugin) onMessage(c *bot.Ctx) {
@@ -64,6 +137,10 @@ func (p *VideoPlugin) onMessage(c *bot.Ctx) {
 		return
 	}
 	c.Abort() // 命中即消费，不走 AI 兜底
+	if p.notifier != nil {
+		p.notifier.Target(c) // 续期消息要发回这个聊天（zhishuzhan 无凭据/失效时弹二维码）
+	}
+	hintID := replyBestEffort(c, "⏳ 正在解析...") // 多源解析/发视频可能要等，先给个即时反馈
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
@@ -74,16 +151,65 @@ func (p *VideoPlugin) onMessage(c *bot.Ctx) {
 		defer cancel()
 		if err := p.handle(ctx, c, link); err != nil {
 			log.Printf("[video] %s 解析失败: %v", link, err)
+			p.storePending(link, c) // 记住失败的那条：扫码续期成功后自动重试
 			replyBestEffort(c, "视频解析失败："+truncStr(err.Error(), 150))
+		}
+		retractHint(c, hintID) // 视频已发出，撤掉提示
+	}()
+}
+
+// storePending 记住最近一条解析失败的消息（retryPending 消费，晚写覆盖）。
+func (p *VideoPlugin) storePending(link string, c *bot.Ctx) {
+	p.pendMu.Lock()
+	defer p.pendMu.Unlock()
+	p.pendLink, p.pendCtx = link, c
+}
+
+// retryPending 扫码登录成功、凭据就绪后自动重试最近一条失败的解析。
+// 用原消息字段重建 Ctx（原 c.Context 可能已随消息分发结束被取消），回复锚点仍是
+// 原消息 id——扫码通常落在 5 分钟被动窗口内，个别超窗的发送失败会进日志。
+func (p *VideoPlugin) retryPending() {
+	p.pendMu.Lock()
+	link, old := p.pendLink, p.pendCtx
+	p.pendLink, p.pendCtx = "", nil
+	p.pendMu.Unlock()
+	if old == nil {
+		return
+	}
+	p.forget(link) // 清去重键：重试若仍失败，手动重发同一条链接也放行
+	nc := bot.NewEventCtx(old.Bot, old.Source, old.Text(), old.UserID(), old.Username(),
+		old.GroupID(), old.MessageID(), old.Timestamp(), old.AtBot())
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("[video] 重试 panic: %v", r)
+			}
+		}()
+		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
+		defer cancel()
+		hintID := replyBestEffort(nc, "⏳ 正在解析...")
+		if err := p.handle(ctx, nc, link); err != nil {
+			log.Printf("[video] 重试 %s 仍失败: %v", link, err)
+			replyBestEffort(nc, "视频解析失败："+truncStr(err.Error(), 150))
+		} else {
+			retractHint(nc, hintID)
 		}
 	}()
 }
 
-// claim 对同一条链接做时间窗去重；返回 false 表示窗口内已处理过。
-func (p *VideoPlugin) claim(link string) bool {
+// linkKey 去重键：链接的 fnv 哈希（claim 记录 / forget 清除共用）。
+func linkKey(link string) uint64 {
 	h := fnv.New64a()
 	_, _ = h.Write([]byte(link))
-	key := h.Sum64()
+	return h.Sum64()
+}
+
+// forget 清掉链接的去重键（重试路径用）。
+func (p *VideoPlugin) forget(link string) { p.mu.Delete(linkKey(link)) }
+
+// claim 对同一条链接做时间窗去重；返回 false 表示窗口内已处理过。
+func (p *VideoPlugin) claim(link string) bool {
+	key := linkKey(link)
 	now := time.Now()
 	if v, ok := p.mu.LoadOrStore(key, now); ok {
 		if t := v.(time.Time); now.Sub(t) < videoDedupTTL {
@@ -102,18 +228,7 @@ func (p *VideoPlugin) claim(link string) bool {
 }
 
 func (p *VideoPlugin) handle(ctx context.Context, c *bot.Ctx, link string) error {
-	var (
-		res *VideoResult
-		err error
-	)
-	switch {
-	case strings.Contains(link, "douyin.com"):
-		res, err = p.ly.ParseDouyin(ctx, link)
-	case strings.Contains(link, "kuaishou.com"):
-		res, err = p.ly.ParseKuaishou(ctx, link)
-	default:
-		return fmt.Errorf("不支持的链接")
-	}
+	res, err := p.chain.Parse(ctx, link) // 链式解析：平台分流/故障转移/聚合报错都在链上
 	if err != nil {
 		return err
 	}
@@ -253,9 +368,32 @@ func (v *VideoResult) Summary() string {
 
 // replyBestEffort 发文本：优先原生 markdown（本机器人群/私聊实测可发，菜单/点歌在用），
 // 失败回落纯文本——官方公域保留 md 异步审核权，个别消息可能延迟或被拒。
-func replyBestEffort(c *bot.Ctx, s string) {
-	if _, err := c.ReplyMarkdown(s); err != nil {
-		_, _ = c.ReplyText(s)
+// 返回实际发出的消息 id（撤回提示消息用；两端都失败为空串）。
+func replyBestEffort(c *bot.Ctx, s string) string {
+	if id, err := c.ReplyMarkdown(s); err == nil {
+		return id
+	}
+	id, _ := c.ReplyText(s)
+	return id
+}
+
+// retractHint 发送完视频后撤回「正在解析」提示。官方限制发出超过 2 分钟的消息
+// 不可撤回——慢解析下撤回失败属正常，只记日志，提示残留无害。
+func retractHint(c *bot.Ctx, msgID string) {
+	if msgID == "" || c.Bot == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	var err error
+	switch c.Source {
+	case "group":
+		err = c.Bot.DeleteGroupMessage(ctx, c.GroupID(), msgID)
+	case "c2c":
+		err = c.Bot.DeleteC2CMessage(ctx, c.UserID(), msgID)
+	}
+	if err != nil {
+		log.Printf("[video] 撤回解析提示失败: %v", err)
 	}
 }
 

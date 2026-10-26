@@ -69,18 +69,6 @@ func main() {
 		// 语音自动转码产物经图床发布公网 URL（未配图床则只能发已是 silk 的 URL）。
 		bot.WithMediaHost(imgHost),
 	)
-	if len(utils.SplitList(os.Getenv("BOT_OWNERS"))) > 0 {
-		log.Println("[main] 已配置主人，OwnerOnly 命令（如 /禁言）仅主人可用")
-	}
-
-	// /id 查发送者自己的 openid / 群 openid：配置 BOT_OWNERS、JOIN_ADMINS 等白名单用。
-	b.Command("id", func(c *bot.Ctx) {
-		out := "你的 openid：" + c.UserID()
-		if c.IsGroup() {
-			out += "\n本群 openid：" + c.GroupID()
-		}
-		_, _ = c.ReplyText(out)
-	}).Desc("查看自己的 openid（配置主人/白名单用）").HideBotMenu().Category(bot.CatGeneral)
 
 	// 日志中间件：每条消息打印一行（openid 不是 QQ 号）。
 	b.Use(func(next bot.MessageHandler) bot.MessageHandler {
@@ -122,6 +110,7 @@ func main() {
 		plugins.NewCounter(),
 		plugins.NewHappy(sched, utils.EnvOr("HAPPY_DAILY_TARGET", "")),
 		plugins.NewSystem(),
+		plugins.NewID(),
 		plugins.NewZhiPu(),
 		plugins.NewZhihuFromEnv(),
 		plugins.NewOnline("AD649FF82C450D9E5BF229974329E36C", "🤖 机器人已上线"),

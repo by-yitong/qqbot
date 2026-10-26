@@ -386,3 +386,14 @@ func TestExtractMentionsAndMentionsAccessor(t *testing.T) {
 		t.Errorf("无 mentions 应为空，得到 %+v", got)
 	}
 }
+
+// Owners：未配置返回 nil；配置了则排序返回（遍历主人发通知用）。
+func TestOwners(t *testing.T) {
+	if got := New(Config{}).Owners(); got != nil {
+		t.Errorf("空配置应返回 nil, got %v", got)
+	}
+	b := New(Config{}, WithOwners("b-owner", "a-owner"))
+	if got := b.Owners(); len(got) != 2 || got[0] != "a-owner" || got[1] != "b-owner" {
+		t.Errorf("Owners() = %v, want [a-owner b-owner]", got)
+	}
+}
