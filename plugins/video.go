@@ -238,7 +238,7 @@ func (p *VideoPlugin) handle(ctx context.Context, c *bot.Ctx, link string) error
 
 	switch {
 	case res.VideoURL != "":
-		return p.sendVideo(ctx, c, res.VideoURL)
+		return p.sendVideo(ctx, c, res.VideoURL, res.Title)
 	case len(res.Images) > 0:
 		n := 0
 		for i, u := range res.Images {
@@ -265,7 +265,7 @@ func (p *VideoPlugin) handle(ctx context.Context, c *bot.Ctx, link string) error
 // （我们推给 QQ；大视频/源站拉不动时可靠）→ 仍失败发直链文本。
 // QQ 拉 URL 有 ~10s 时限（code 850027「富媒体文件上传超时」），几十 MB 的大视频
 // URL 模式必然超时，分片直传是唯一可靠路径（2026-10 生产实测，61MB/8min 视频）。
-func (p *VideoPlugin) sendVideo(ctx context.Context, c *bot.Ctx, videoURL string) error {
+func (p *VideoPlugin) sendVideo(ctx context.Context, c *bot.Ctx, videoURL, title string) error {
 	if _, err := c.ReplyVideo(videoURL); err == nil {
 		return nil
 	} else {
@@ -273,13 +273,31 @@ func (p *VideoPlugin) sendVideo(ctx context.Context, c *bot.Ctx, videoURL string
 	}
 	if data, contentType, err := p.download(ctx, videoURL); err != nil {
 		log.Printf("[video] 下载视频失败: %v", err)
-	} else if _, err := c.ReplyMediaBytes(2, "video"+extOf(contentType, videoURL), data); err == nil {
+	} else if _, err := c.ReplyMediaBytes(2, videoFileName(title, extOf(contentType, videoURL)), data); err == nil {
 		return nil
 	} else {
 		log.Printf("[video] 分片直传发送失败: %v", err)
 	}
 	_, err := c.ReplyText("视频发送失败，直链（短期有效）：" + videoURL)
 	return err
+}
+
+// videoFileName 分片直传的文件名：视频标题去掉文件系统不友好字符、截断；空标题兜底 video。
+func videoFileName(title, ext string) string {
+	name := strings.Map(func(r rune) rune {
+		switch r {
+		case '/', '\\', ':', '*', '?', '"', '<', '>', '|', '\n', '\r', '\t':
+			return ' '
+		}
+		return r
+	}, strings.TrimSpace(title))
+	if name == "" {
+		name = "video"
+	}
+	if r := []rune(name); len(r) > 50 {
+		name = strings.TrimSpace(string(r[:50]))
+	}
+	return name + ext
 }
 
 // download 拉取视频直链字节（带体积上限）。

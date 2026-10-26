@@ -320,6 +320,22 @@ func TestOneLine(t *testing.T) {
 	}
 }
 
+// videoFileName：分片直传文件名——标题去非法字符/截断，空标题兜底。
+func TestVideoFileName(t *testing.T) {
+	if got := videoFileName("我们用了一千万建材就为了做一张地图画合照？？！！", ".mp4"); got != "我们用了一千万建材就为了做一张地图画合照？？！！.mp4" {
+		t.Errorf("常规标题: %q", got)
+	}
+	if got := videoFileName("a/b\\c:d*e?f\"g<h>i|j\nk", ".mp4"); strings.ContainsAny(got, "/\\:*?\"<>|\n") || !strings.HasPrefix(got, "a b c d e") {
+		t.Errorf("非法字符应替换为空格: %q", got)
+	}
+	if got := videoFileName("", ".mp4"); got != "video.mp4" {
+		t.Errorf("空标题兜底: %q", got)
+	}
+	if got := videoFileName(strings.Repeat("字", 80), ".mp4"); len([]rune(got)) != 50+len(".mp4") {
+		t.Errorf("超长截断到 50: %d", len([]rune(got)))
+	}
+}
+
 // 编译期确认超时/体积常量未被误改。
 func TestVideoConstants(t *testing.T) {
 	if videoDedupTTL < time.Minute {
