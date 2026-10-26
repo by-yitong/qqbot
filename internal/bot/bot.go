@@ -308,7 +308,9 @@ func (b *Bot) Run(ctx context.Context) error {
 	if err := token.StartRefreshAccessToken(ctx, ts); err != nil {
 		return err
 	}
-	b.api = botgo.NewOpenAPI(creds.AppID, ts)
+	// botgo 默认 5s，但 /files 富媒体接口是腾讯服务端先拉取 URL 再回包，
+	// 大视频常超 5s（2026-10 生产实测），放宽到 60s；普通消息调用 1-3s 返回不受影响。
+	b.api = botgo.NewOpenAPI(creds.AppID, ts).WithTimeout(60 * time.Second)
 	b.appID = creds.AppID
 
 	b.startOnce.Do(func() {
