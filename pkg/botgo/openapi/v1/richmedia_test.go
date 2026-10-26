@@ -163,10 +163,10 @@ func TestUploadFileChunked(t *testing.T) {
 			if req.MD5 != md5Full || req.SHA1 != sha1Full || req.MD510m != md5Full { // <10MB 时 md5_10m == 全量 md5
 				t.Errorf("校验值错: got md5=%s sha1=%s md5_10m=%s", req.MD5, req.SHA1, req.MD510m)
 			}
-			// 注意 block_size 在本实现里是 int；官方文档为字符串，两版都兼容。
-			fmt.Fprint(w, fmt.Sprintf(`{"upload_id":"UP1","block_size":"5","parts":[
-				{"index":0,"presigned_url":%q,"block_size":5},
-				{"index":1,"presigned_url":%q,"block_size":5},
+			// index/block_size 官方实测返回字符串（2026-10 生产），也兼容数字写法。
+			fmt.Fprint(w, fmt.Sprintf(`{"upload_id":"UP1","parts":[
+				{"index":"0","presigned_url":%q,"block_size":"5"},
+				{"index":"1","presigned_url":%q,"block_size":"5"},
 				{"index":2,"presigned_url":%q,"block_size":20}]}`,
 				srv.URL+"/chunk/0", srv.URL+"/chunk/1", srv.URL+"/chunk/2"))
 		case strings.HasPrefix(r.URL.Path, "/chunk/"):
@@ -245,7 +245,7 @@ func TestUploadFileChunkedUserScope(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		if strings.HasPrefix(r.URL.Path, "/v2/users/U1/upload_prepare") {
 			userScopeHit = true
-			fmt.Fprint(w, `{"upload_id":"UP2","parts":[{"index":0,"presigned_url":`+strconv.Quote(srv.URL+"/c0")+`,"block_size":4}]}`)
+			fmt.Fprint(w, `{"upload_id":"UP2","parts":[{"index":"0","presigned_url":`+strconv.Quote(srv.URL+"/c0")+`,"block_size":"4"}]}`)
 			return
 		}
 		if strings.HasPrefix(r.URL.Path, "/c0") {

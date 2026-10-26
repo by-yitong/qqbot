@@ -1,5 +1,7 @@
 package dto
 
+import "encoding/json"
+
 // 富媒体上传相关 dto（本地 fork 补充）。
 //
 // 两种上传模式：
@@ -42,11 +44,12 @@ type UploadPrepareResult struct {
 	Parts    []UploadPart `json:"parts"`
 }
 
-// UploadPart 一个分片的预签名信息。
+// UploadPart 一个分片的预签名信息。index/block_size 官方实测返回字符串
+// （"5"），文档亦有数字写法，用 json.Number 两版都兼容。
 type UploadPart struct {
-	Index        int    `json:"index"`
-	PresignedURL string `json:"presigned_url"`
-	BlockSize    int    `json:"block_size"`
+	Index        json.Number `json:"index"`
+	PresignedURL string      `json:"presigned_url"`
+	BlockSize    json.Number `json:"block_size"`
 }
 
 // UploadPartFinishReq 分片上传完成通知请求。

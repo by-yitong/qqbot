@@ -136,6 +136,9 @@ func (o *openAPI) uploadFileChunked(ctx context.Context, ep mediaEndpoints, open
 		SetResult(dto.UploadPrepareResult{}).
 		Post(o.getURL(ep.prepare))
 	if err != nil {
+		if rsp != nil { // 带上原始响应体：官方字段类型漂移时一眼定位（2026-10 block_size 字符串坑）
+			return nil, fmt.Errorf("upload_prepare 失败: %w（响应: %s）", err, truncateForLog(rsp.Body(), 300))
+		}
 		return nil, fmt.Errorf("upload_prepare 失败: %w", err)
 	}
 	prep := rsp.Result().(*dto.UploadPrepareResult)
@@ -149,30 +152,35 @@ func (o *openAPI) uploadFileChunked(ctx context.Context, ep mediaEndpoints, open
 	// 2+3. 顺序 PUT 每个分片并通知完成（upload_config.concurrency 默认 1）。
 	offset := 0
 	for _, part := range prep.Parts {
-		if part.PresignedURL == "" || part.BlockSize <= 0 {
-			return nil, fmt.Errorf("分片信息异常: index=%d", part.Index)
+		idx, err := part.Index.Int64()
+		size, err2 := part.BlockSize.Int64()
+		if err != nil || err2 != nil || idx < 0 || size <= 0 {
+			return nil, fmt.Errorf("分片信息异常: index=%v size=%v", part.Index, part.BlockSize)
 		}
-		end := offset + part.BlockSize
+		if part.PresignedURL == "" {
+			return nil, fmt.Errorf("分片 %d 缺少预签名地址", idx)
+		}
+		end := offset + int(size)
 		if end > len(data) {
 			end = len(data)
 		}
 		chunk := data[offset:end]
 		if len(chunk) == 0 {
-			return nil, fmt.Errorf("分片 %d 越界（offset=%d size=%d 总长=%d）", part.Index, offset, part.BlockSize, len(data))
+			return nil, fmt.Errorf("分片 %d 越界（offset=%d size=%d 总长=%d）", idx, offset, size, len(data))
 		}
 		if err := putChunk(ctx, part.PresignedURL, chunk); err != nil {
-			return nil, fmt.Errorf("分片 %d 上传失败: %w", part.Index, err)
+			return nil, fmt.Errorf("分片 %d 上传失败: %w", idx, err)
 		}
 		if _, err := o.request(ctx).
 			SetPathParam(ep.finishParam, openID).
 			SetBody(dto.UploadPartFinishReq{
 				UploadID:  prep.UploadID,
-				PartIndex: part.Index,
+				PartIndex: int(idx),
 				BlockSize: strconv.Itoa(len(chunk)),
 				MD5:       fmt.Sprintf("%x", md5.Sum(chunk)),
 			}).
 			Post(o.getURL(ep.finish)); err != nil {
-			return nil, fmt.Errorf("分片 %d 完成通知失败: %w", part.Index, err)
+			return nil, fmt.Errorf("分片 %d 完成通知失败: %w", idx, err)
 		}
 		offset = end
 	}
@@ -192,6 +200,9 @@ func (o *openAPI) uploadFileChunked(ctx context.Context, ep mediaEndpoints, open
 		SetResult(dto.RichMediaFile{}).
 		Post(o.getURL(ep.merge))
 	if err != nil {
+		if rsp != nil {
+			return nil, fmt.Errorf("分片合并失败: %w（响应: %s）", err, truncateForLog(rsp.Body(), 300))
+		}
 		return nil, fmt.Errorf("分片合并失败: %w", err)
 	}
 	f := rsp.Result().(*dto.RichMediaFile)
