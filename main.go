@@ -143,7 +143,7 @@ func main() {
 	// 短视频解析：解析不依赖 AI，无条件启用（没配 AI_API_KEY 也能用）。
 	// 截流语义靠注册顺序：须在 Recorder（先落库再被消费）之后、setupAgent
 	// 装配的 AI 兜底之前——命中分享链接即 Abort，勿挪。
-	b.UsePlugin(plugins.NewVideo(imgHost))
+	b.UsePlugin(plugins.NewVideo())
 
 	// Agent 兜底：未命中命令的消息交给 agent（工具循环/多轮记忆/压缩/技能/MCP，
 	// 装配细节见 setup.go）；配置了 AI_API_KEY 才启用。

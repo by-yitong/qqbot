@@ -174,6 +174,12 @@ b.Command("echo", echo).
 > ⚠️ **keyboard 按钮**：被动消息带 keyboard 可用（点歌选歌、菜单在用）；**主动消息带
 > keyboard 会被官方整条拒绝**（40011021「rows.buttons.id 无效」，2026-10 实测），事件触发
 > 场景的可点交互用内嵌指令标签（`CmdInputTag`）代替（入群审批提醒卡片如此）。
+>
+> ⚠️ **富媒体 URL 模式的拉取时限**：POST /files 给 URL 后是 QQ 服务端代拉，实测有
+> ~10s 时限（超时报 code 850027「富媒体文件上传超时」）+ 视频 30M 软限——几十 MB 的
+> 大视频 URL 模式必然失败（抖音直链、自建图床中转都一样，2026-10 生产实测 61MB 视频
+> 双双超时）。大文件走分片直传：`c.ReplyMediaBytes(fileType, filename, data)`（我们
+> 推字节给 QQ，协议见 pkg/botgo richmedia.go；openapi 客户端超时已放宽 60s）。
 
 **内嵌指令标签**（md 正文里的可点命令，`internal/bot/tag.go`）：
 - `bot.CmdInputTag(text, show)` 生成官方 `qqbot-cmd-input` 标签：客户端把该段渲染成

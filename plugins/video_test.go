@@ -21,7 +21,7 @@ import (
 // 链上 Abort 短路语义见 internal/bot 的 TestAbortStopsListeners；
 // 装配顺序（Recorder → Video → Agent）由 main.go 的注释钉住。
 func TestVideoOnMessageAbortsShareLink(t *testing.T) {
-	p := NewVideo(nil)
+	p := NewVideo()
 	// 解析 API 指向本地死端口：后台 goroutine 秒失败，测试不触外网。
 	p.chain = NewParserChain(&LuoyingClient{Base: "http://127.0.0.1:1", APIKey: "k",
 		HTTP: &http.Client{Timeout: time.Second}})
@@ -56,11 +56,11 @@ func TestVideoDefaultParserOrder(t *testing.T) {
 	t.Setenv("ZHISHUZHAN_USER_ID", "")
 	t.Setenv("LUOYING_API_KEY", "k")
 	t.Setenv("VIDEO_PARSERS", "")
-	if got := names(NewVideo(nil)); strings.Join(got, ",") != "zhishuzhan,luoying" {
+	if got := names(NewVideo()); strings.Join(got, ",") != "zhishuzhan,luoying" {
 		t.Errorf("默认序应 zhishuzhan,luoying: %v", got)
 	}
 	t.Setenv("VIDEO_PARSERS", "luoying")
-	if got := names(NewVideo(nil)); strings.Join(got, ",") != "luoying" {
+	if got := names(NewVideo()); strings.Join(got, ",") != "luoying" {
 		t.Errorf("VIDEO_PARSERS=luoying 应只剩 luoying: %v", got)
 	}
 }

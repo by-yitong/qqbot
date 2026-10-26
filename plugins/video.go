@@ -17,7 +17,6 @@ import (
 	"time"
 
 	"qqbot/internal/bot"
-	"qqbot/internal/imgstore"
 )
 
 // shareLinkRE 从分享文案中提取抖音/快手短链（链接混在口令文字中间，必须正则扫）。
@@ -27,7 +26,7 @@ var shareLinkRE = regexp.MustCompile(`https?://(?:v\.douyin\.com|v\.kuaishou\.co
 // 常被多人连发，短时间内只解析一次。
 const videoDedupTTL = 10 * time.Minute
 
-// maxProxyBytes 走图床中转时允许下载的最大视频体积（QQ URL 模式对大文件不稳）。
+// maxProxyBytes 分片直传允许下载的最大视频体积（官方分片上传硬限 200MB）。
 const maxProxyBytes = 200 << 20
 
 // VideoPlugin 短视频解析插件。
@@ -35,8 +34,7 @@ type VideoPlugin struct {
 	chain    *ParserChain      // 多源解析链（按优先级故障转移，源定义见 videoparser.go/luoying.go/zhishuzhan.go）
 	zs       *ZhishuzhanClient // zhishuzhan 源引用（注入扫码续期通知用；默认启用，不为 nil）
 	notifier *chatNotifier     // 续期消息 → 触发解析的聊天（Install 时创建并注入 zs）
-	imgHost  *imgstore.Host
-	client   *http.Client // 下载视频直链用（独立于 resty，放宽超时）
+	client   *http.Client      // 下载视频直链用（独立于 resty，放宽超时）
 
 	mu sync.Map // link-hash -> 解析开始时间（去重）
 
@@ -45,16 +43,15 @@ type VideoPlugin struct {
 	pendCtx  *bot.Ctx   // 对应消息上下文（重试时重建发送锚点用）
 }
 
-// NewVideo 创建插件。imgHost 用于视频直链被 QQ 拉取失败时的图床中转。
-func NewVideo(imgHost *imgstore.Host) *VideoPlugin {
+// NewVideo 创建插件。
+func NewVideo() *VideoPlugin {
 	// 默认序：zhishuzhan 首选（默认启用、凭据可空，扫码登录自动引导，见 zhishuzhan.go），
 	// luoying 备份（未配 key 返回 nil，orderParsers 剔除）；VIDEO_PARSERS 可重排/取子集。
 	zs := NewZhishuzhanClientFromEnv()
 	return &VideoPlugin{
-		chain:   NewParserChain(orderParsers([]Parser{zs, NewLuoyingParserFromEnv()}, os.Getenv("VIDEO_PARSERS"))...),
-		zs:      zs,
-		imgHost: imgHost,
-		client:  &http.Client{Timeout: 4 * time.Minute},
+		chain:  NewParserChain(orderParsers([]Parser{zs, NewLuoyingParserFromEnv()}, os.Getenv("VIDEO_PARSERS"))...),
+		zs:     zs,
+		client: &http.Client{Timeout: 10 * time.Minute},
 	}
 }
 
@@ -264,28 +261,22 @@ func (p *VideoPlugin) handle(ctx context.Context, c *bot.Ctx, link string) error
 	}
 }
 
-// sendVideo 发视频：直链 URL 模式 → 失败则下载经图床中转 → 仍失败发直链文本。
+// sendVideo 发视频：直链 URL 模式（QQ 服务端代拉，快）→ 失败则下载字节分片直传
+// （我们推给 QQ；大视频/源站拉不动时可靠）→ 仍失败发直链文本。
+// QQ 拉 URL 有 ~10s 时限（code 850027「富媒体文件上传超时」），几十 MB 的大视频
+// URL 模式必然超时，分片直传是唯一可靠路径（2026-10 生产实测，61MB/8min 视频）。
 func (p *VideoPlugin) sendVideo(ctx context.Context, c *bot.Ctx, videoURL string) error {
 	if _, err := c.ReplyVideo(videoURL); err == nil {
 		return nil
 	} else {
-		log.Printf("[video] 直链发送失败，尝试图床中转: %v", err)
+		log.Printf("[video] 直链发送失败，改分片直传: %v", err)
 	}
-	if p.imgHost != nil && p.imgHost.Configured() {
-		data, contentType, err := p.download(ctx, videoURL)
-		if err == nil {
-			if u, err := p.imgHost.Upload(ctx, data, extOf(contentType, videoURL)); err == nil {
-				if _, err := c.ReplyVideo(u); err == nil {
-					return nil
-				} else {
-					log.Printf("[video] 图床中转发送失败: %v", err)
-				}
-			} else {
-				log.Printf("[video] 图床上传失败: %v", err)
-			}
-		} else {
-			log.Printf("[video] 下载视频失败: %v", err)
-		}
+	if data, contentType, err := p.download(ctx, videoURL); err != nil {
+		log.Printf("[video] 下载视频失败: %v", err)
+	} else if _, err := c.ReplyMediaBytes(2, "video"+extOf(contentType, videoURL), data); err == nil {
+		return nil
+	} else {
+		log.Printf("[video] 分片直传发送失败: %v", err)
 	}
 	_, err := c.ReplyText("视频发送失败，直链（短期有效）：" + videoURL)
 	return err
@@ -311,7 +302,7 @@ func (p *VideoPlugin) download(ctx context.Context, url string) ([]byte, string,
 		return nil, "", err
 	}
 	if len(data) > maxProxyBytes {
-		return nil, "", fmt.Errorf("视频超过 %dMB 中转上限", maxProxyBytes>>20)
+		return nil, "", fmt.Errorf("视频超过 %dMB 直传上限", maxProxyBytes>>20)
 	}
 	return data, resp.Header.Get("Content-Type"), nil
 }
@@ -451,7 +442,7 @@ func fmtDur(sec float64) string {
 	return fmt.Sprintf("%d秒", s)
 }
 
-// extOf 从 Content-Type 或 URL 推断扩展名（图床中转命名用）。
+// extOf 从 Content-Type 或 URL 推断扩展名（分片直传文件名用）。
 func extOf(contentType, url string) string {
 	if i := strings.Index(contentType, "/"); i >= 0 {
 		if e := strings.TrimSpace(strings.SplitN(contentType[i+1:], ";", 2)[0]); e != "" && e != "octet-stream" {

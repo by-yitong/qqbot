@@ -238,6 +238,20 @@ func (c *Ctx) ReplyVideo(videoURL string) (string, error) {
 	}
 }
 
+// ReplyMediaBytes 以分片直传发送本地媒体字节（fileType 1图片/2视频/4文件；语音须先
+// 转 silk 走 ReplyVoice）。URL 模式的兜底：QQ 服务端拉取 URL 有 ~10s 时限且视频 30M
+// 软限，大文件走本路径由我们推字节，可靠但慢（受出口带宽限制）。仅群/私聊支持。
+func (c *Ctx) ReplyMediaBytes(fileType int, filename string, data []byte) (string, error) {
+	switch c.Source {
+	case "group":
+		return c.Bot.SendGroupMediaBytes(c.Context, c.groupID, c.messageID, fileType, filename, data)
+	case "c2c":
+		return c.Bot.SendC2CMediaBytes(c.Context, c.userID, c.messageID, fileType, filename, data)
+	default:
+		return "", ErrChannelImageUnsupported
+	}
+}
+
 // ReplyVoice 以语音回复当前消息（file_type=3，URL 模式；音频须为 silk 格式）。仅群/私聊支持。
 func (c *Ctx) ReplyVoice(voiceURL string) (string, error) {
 	switch c.Source {
