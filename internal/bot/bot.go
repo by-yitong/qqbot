@@ -367,6 +367,11 @@ func (b *Bot) Run(ctx context.Context) error {
 // --- botgo 事件入口 -> *Ctx ---
 
 func (b *Bot) onGroupAtMessage(payload *dto.WSPayload, data *dto.WSGroupATMessageData) error {
+	// 防御：@全体成员 的 mention 官方也标 is_you=true，理论上可能经此入口下发；
+	// 非点名本 bot 的广播 / @ 其他机器人的消息整条忽略（与 onGroupMessage 同规则）。
+	if raw := payload.RawMessage; raw != nil && !atSelf(raw) && (mentionsEveryone(raw) || mentionsOtherBot(raw)) {
+		return nil
+	}
 	c := b.fromMessage(context.Background(), "group", (*dto.Message)(data), true)
 	b.EnrichGroupRoles(c, payload.RawMessage)
 	b.dispatch(c)
@@ -392,11 +397,15 @@ func (b *Bot) onGroupMessage(_ *dto.WSPayload, msg []byte) error {
 	if err := event.ParseData(msg, &m); err != nil {
 		return err
 	}
-	// 全量群消息里也可能 @ 了 bot（mentions.is_you=true）；botgo 的 dto.User 未带 is_you 字段，用 gjson 补判。
-	atBot := gjson.Get(string(msg), "d.mentions.#(is_you==true)").Exists()
-	// 没有 @ 本 bot、却 @ 了其他机器人（如「@其他机器人 /help」）：消息是对别的 bot 说的。
+	// 全量群消息里也可能 @ 了 bot（mentions.is_you=true 且 scope!="all"）。注意不能
+	// 只看 is_you：@全体成员 的 mention 官方也带 is_you=true（scope="all"，2026-10
+	// 生产实测 bot 曾因此抢答管理员的全体公告）。
+	atBot := atSelf(msg)
+	// 没有 @ 本 bot 的两类消息整条忽略：
+	//   - @全体成员：面向全群的广播，不是对本 bot 说话；
+	//   - @ 了其他机器人（如「@其他机器人 /help」）：消息是对别的 bot 说的。
 	// cleanContent 会把 @ 结构剥掉，剩下的命令文本会按裸命中规则匹配到本 bot，须整条忽略。
-	if !atBot && mentionsOtherBot(msg) {
+	if !atBot && (mentionsEveryone(msg) || mentionsOtherBot(msg)) {
 		return nil
 	}
 	c := b.fromMessage(context.Background(), "group", &m, atBot)
@@ -438,6 +447,41 @@ func (b *Bot) EnrichGroupRoles(c *Ctx, raw []byte) {
 		}
 		return true
 	})
+}
+
+// atSelf 判定群消息事件是否点名了本 bot：mentions 里有 is_you=true 且 scope!="all"
+// 的条目。botgo 的 dto.User 未带 is_you/scope 字段，用 gjson 从原始 payload 读；
+// 旧事件缺 scope 时视为点名（保持原有行为）。
+func atSelf(raw []byte) bool {
+	found := false
+	gjson.GetBytes(raw, "d.mentions").ForEach(func(_, m gjson.Result) bool {
+		if m.Get("is_you").Bool() && m.Get("scope").String() != "all" {
+			found = true
+			return false // 找到即停
+		}
+		return true
+	})
+	return found
+}
+
+// mentionsEveryone 报告群消息事件是否 @ 了全体成员。官方形态是 mentions 里一条
+// scope="all"（同时带 is_you=true、无 id，2026-10 实测）；更早的事件没有 mentions，
+// content 里字面 <@all> / @全体成员 开头（2026-10-22 实测）。@全体成员 是面向全群
+// 的广播，不是对本 bot 说话，未单独点名本 bot 时整条忽略。
+func mentionsEveryone(raw []byte) bool {
+	found := false
+	gjson.GetBytes(raw, "d.mentions").ForEach(func(_, m gjson.Result) bool {
+		if m.Get("scope").String() == "all" {
+			found = true
+			return false // 找到即停
+		}
+		return true
+	})
+	if found {
+		return true
+	}
+	c := strings.TrimSpace(gjson.GetBytes(raw, "d.content").String())
+	return strings.HasPrefix(c, "<@all>") || strings.HasPrefix(c, "@全体成员")
 }
 
 // mentionsOtherBot 报告群消息事件的 mentions 里是否 @ 了其他机器人

@@ -350,6 +350,65 @@ func TestOnGroupMessageIgnoresOtherBot(t *testing.T) {
 	}
 }
 
+// TestOnGroupMessageIgnoresEveryone @全体成员的消息整条忽略：官方给 @全体成员 的
+// mention 也带 is_you=true（scope="all"、无 id，2026-10 生产实测），此前被误判成
+// 点名本 bot，bot 抢答过管理员的全体公告。同时单独 @ 本 bot 的不受影响。
+func TestOnGroupMessageIgnoresEveryone(t *testing.T) {
+	b := newTestBot()
+	var ran bool
+	b.Command("ping", func(c *Ctx) { ran = true })
+
+	call := func(content, mentions string) bool {
+		ran = false
+		if err := b.onGroupMessage(nil, grpEvent(content, mentions)); err != nil {
+			t.Fatalf("onGroupMessage: %v", err)
+		}
+		return ran
+	}
+
+	// @全体成员 + 命令：忽略（scope="all"，is_you=true 不算点名）
+	if call("<@all> /ping", `{"is_you":true,"scope":"all","username":"全体成员"}`) {
+		t.Error("@全体成员的消息不应触发本 bot 命令")
+	}
+	// 旧形态：content 字面 @全体成员、无 mentions：同样忽略（2026-10-22 实测）
+	if call("@全体成员 /ping", "") {
+		t.Error("字面 @全体成员的消息不应触发本 bot 命令")
+	}
+	// @全体成员 + @ 本 bot（scope=single）：本 bot 被单独点名，照常触发
+	if !call("<@ME> <@all> /ping", `{"id":"ME","member_openid":"ME","bot":true,"is_you":true,"scope":"single"},`+
+		`{"is_you":true,"scope":"all","username":"全体成员"}`) {
+		t.Error("@本 bot（含 @全体成员）的消息应照常触发")
+	}
+	// 裸命令：照常触发
+	if !call("/ping", "") {
+		t.Error("裸命令应照常触发")
+	}
+}
+
+// TestOnGroupAtMessageIgnoresEveryoneAndOtherBot GROUP_AT_MESSAGE_CREATE 入口的
+// 防御过滤：@全体成员 的 mention 官方也标 is_you=true，可能经此入口下发；
+// 非点名本 bot 的 @全体成员 / @其他机器人消息整条忽略。
+func TestOnGroupAtMessageIgnoresEveryoneAndOtherBot(t *testing.T) {
+	b := newTestBot()
+	var ran bool
+	b.Command("ping", func(c *Ctx) { ran = true })
+
+	call := func(raw []byte) bool {
+		ran = false
+		if err := b.onGroupAtMessage(&dto.WSPayload{RawMessage: raw}, &dto.WSGroupATMessageData{}); err != nil {
+			t.Fatalf("onGroupAtMessage: %v", err)
+		}
+		return ran
+	}
+
+	if call(grpEvent("<@all> /ping", `{"is_you":true,"scope":"all","username":"全体成员"}`)) {
+		t.Error("@全体成员的消息不应经 GROUP_AT_MESSAGE_CREATE 触发命令")
+	}
+	if call(grpEvent("<@B2> /ping", `{"id":"B2","member_openid":"B2","bot":true,"username":"其他机器人"}`)) {
+		t.Error("@其他机器人的消息不应经 GROUP_AT_MESSAGE_CREATE 触发命令")
+	}
+}
+
 // TestExtractMentionsAndMentionsAccessor fromMessage 组装的 Ctx.Mentions()：
 // 排除空 id；api 未就绪不排除任何人；已知自身 openid 后排除机器人自身。
 func TestExtractMentionsAndMentionsAccessor(t *testing.T) {

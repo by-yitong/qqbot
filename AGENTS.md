@@ -76,4 +76,6 @@ systemd 每 5 秒崩溃重启刷屏**（2026-09-16 已清理，统一走 systemd
   AI 改的文件）并由 setsid 分离进程 15s 后调 build-run.sh restart（同步重启会杀掉 bot 自身）。
   部署日志 `data/selfdev-deploy.log`。前提：bot 进程用户 `sudo systemctl restart` 免密。
 - 机器人自身行为语义（命令裸命中、@ 过滤等）见 docs/development.md；
-  群全量消息里「未 @ 本 bot 却 @ 了其他机器人」的消息整条忽略（bot.go `mentionsOtherBot`）。
+  群消息里未点名本 bot 的两类消息整条忽略：@ 了其他机器人（bot.go `mentionsOtherBot`）、
+  @全体成员（`mentionsEveryone`——注意官方给 @全体成员 的 mention 也带 `is_you:true`
+  +`scope:"all"`，判定点名必须用 `atSelf` 排除 scope=all，2026-10 曾因此抢答全体公告）。
