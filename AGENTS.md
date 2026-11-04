@@ -64,6 +64,9 @@ systemd 每 5 秒崩溃重启刷屏**（2026-09-16 已清理，统一走 systemd
   （40011021「rows.buttons.id 无效」，2026-10 实测），事件触发的可点交互一律用指令标签。
   官方公域仍保留 md 异步审核权，个别消息可能延迟，发送失败要留纯文本兜底。
   详见 docs/development.md「Bot 级发送」。
+- 2026-10 官方新增已封装：图文卡片（`SendGroupCard/SendC2CCard`，msg_type=8）、素材管理
+  （`UploadMediaImage`→`qqbot-media://` 引用，md 图片平台转存）、@全体标签
+  （`bot.AtEveryoneTag`，群管+每群每日 1 次）。
 - 配置在仓库根 `.env`（参考 `.env.example`），改了要 `systemctl restart` 才生效；
   条件插件按 env 启用（各 `NewXxxFromEnv()`）。
 - `scripts/deploy/qqbot.service` 是 unit 模板（与本机已装的 `qqbot-agent.service` 保持一致）；

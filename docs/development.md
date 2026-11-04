@@ -156,6 +156,7 @@ b.Command("echo", echo).
 | `b.SendChannelText(ctx, channelID, text)` | 频道**主动**发（无需锚点） |
 | `b.SendGroupText(ctx, groupID, msgAnchor, text)` | 群：msgAnchor 空=**主动**（本机器人已开通）；非空=被动回复 |
 | `b.SendC2CText(ctx, userID, msgAnchor, text)` | 私聊：msgAnchor 空=**主动**（本机器人已开通）；非空=被动回复 |
+| `b.SendGroupCard(ctx, groupID, msgAnchor, card)` / `b.SendC2CCard(ctx, userID, msgAnchor, card)` | 发**图文卡片**（MsgType=8，`dto.CardContent{Title≤50字, Description≤200字, URL, PicURL}` 须 https）；锚点语义同文本 |
 
 原生 markdown（`MsgType=2`）：
 | 方法 | 语义 |
@@ -180,6 +181,14 @@ b.Command("echo", echo).
 > 大视频 URL 模式必然失败（抖音直链、自建图床中转都一样，2026-10 生产实测 61MB 视频
 > 双双超时）。大文件走分片直传：`c.ReplyMediaBytes(fileType, filename, data)`（我们
 > 推字节给 QQ，协议见 pkg/botgo richmedia.go；openapi 客户端超时已放宽 60s）。
+
+**素材管理（qqbot-media）**：`b.UploadMediaImage(ctx, fileName, contentType, data)` 上传
+图片到平台拿 `qqbot-media://` 引用（≤10MB，png/jpeg/gif/webp，单机器人 100 张，引用 90 天
+滑动过期），markdown 中 `![说明 #宽px #高px](qqbot-media://...)` 引用、平台转存，解决公网
+图片 URL 被 QQ 限时拉取不稳的问题。管理接口（List/Delete）在 `pkg/botgo`（MediaImageAPI）。
+
+**@全体成员**：群文本/markdown content 拼入 `bot.AtEveryoneTag`（`<qqbot-at-everyone />`）
+即 @全体；限群聊、机器人须群管理员、每群每天 1 次，超限整条被拒，须备纯文本降级。
 
 **内嵌指令标签**（md 正文里的可点命令，`internal/bot/tag.go`）：
 - `bot.CmdInputTag(text, show)` 生成官方 `qqbot-cmd-input` 标签：客户端把该段渲染成
