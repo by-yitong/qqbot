@@ -38,6 +38,7 @@ type OpenAPI interface {
 	GroupJoinRequestAPI
 	MenuAPI
 	RichMediaUploadAPI
+	MediaImageAPI
 }
 
 // Base 基础能力接口
@@ -349,4 +350,15 @@ type RichMediaUploadAPI interface {
 	UploadUserRichMedia(ctx context.Context, userID string, fileType int, fileURL string) (*dto.RichMediaFile, error)
 	UploadGroupFileChunked(ctx context.Context, groupID string, fileType int, filename string, data []byte) (*dto.RichMediaFile, error)
 	UploadUserFileChunked(ctx context.Context, userID string, fileType int, filename string, data []byte) (*dto.RichMediaFile, error)
+}
+
+// MediaImageAPI 素材管理接口（官方 2026-10-21：图片上传平台换 qqbot-media:// 引用，
+// markdown 中引用、平台转存，摆脱公网图片 URL 限时拉取问题）。
+type MediaImageAPI interface {
+	// UploadMediaImage 一步式上传：校验 → prepare → 预签名 PUT 直传 → complete。
+	UploadMediaImage(ctx context.Context, fileName, contentType string, data []byte) (*dto.MediaImage, error)
+	PrepareMediaImage(ctx context.Context, req dto.MediaImagePrepareReq) (*dto.MediaImagePrepareRsp, error)
+	CompleteMediaImage(ctx context.Context, req dto.MediaImageCompleteReq) (*dto.MediaImage, error)
+	ListMediaImages(ctx context.Context, cursor string) (*dto.MediaImageListRsp, error)
+	DeleteMediaImage(ctx context.Context, imageID string) error
 }

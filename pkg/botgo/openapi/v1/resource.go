@@ -57,6 +57,12 @@ const (
 	userUploadPrepareURI     uri = "/v2/users/{openid}/upload_prepare"
 	userUploadPartFinishURI  uri = "/v2/users/{openid}/upload_part_finish"
 
+	// --- 素材管理（本地 fork 补充：官方 2026-10-21 新增，markdown 图片平台转存）---
+	mediaImagesURI        uri = "/v2/media-images"
+	mediaImagePrepareURI  uri = "/v2/media-images/prepare"
+	mediaImageCompleteURI uri = "/v2/media-images/complete"
+	mediaImageDeleteURI   uri = "/v2/media-images/{image_id}/delete"
+
 	messageURI uri = "/channels/{channel_id}/messages/{message_id}"
 
 	userMeURI       uri = "/users/@me"
