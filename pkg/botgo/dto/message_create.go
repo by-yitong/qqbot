@@ -48,6 +48,7 @@ const (
 	ATMsg          MessageType = 5 // @消息
 	InputNotifyMsg MessageType = 6 // 输入状态消息
 	RichMediaMsg   MessageType = 7 // 富媒体消息（图片，视频等）
+	CardMsg        MessageType = 8 // 图文卡片消息（card 字段）
 )
 
 // MessageToCreate 发送消息结构体定义
@@ -68,6 +69,7 @@ type MessageToCreate struct {
 	SubscribeID      string                    `json:"subscribe_id,omitempty"`    // 订阅id，发送订阅消息时使用
 	InputNotify      *InputNotify              `json:"input_notify,omitempty"`    // 输入状态状态信息
 	Media            *MediaInfo                `json:"media,omitempty"`           // 富媒体信息
+	Card             *Card                     `json:"card,omitempty"`            // 图文卡片（MsgType=8）
 	PromptKeyboard   *PromptKeyboard           `json:"prompt_keyboard,omitempty"` // 消息扩展信息
 	ActionButton     *ActionButton             `json:"action_button,omitempty"`   // 消息操作结构
 	Stream           *Stream                   `json:"stream,omitempty"`          // 流式消息信息
@@ -166,4 +168,19 @@ type InputNotify struct {
 // MediaInfo 富媒体信息
 type MediaInfo struct {
 	FileInfo []byte `json:"file_info,omitempty"` // 富媒体文件信息，通过上传接口取得
+}
+
+// Card 图文卡片（MsgType=8，官方 2026-10-28 新增，群聊/单聊支持）。Type 固定 "tuwen"。
+type Card struct {
+	Type    string      `json:"type"`
+	Content CardContent `json:"content"`
+}
+
+// CardContent 图文卡片内容：Title 1-50 字、Description 1-200 字、
+// URL/PicURL 须 https 且 ≤1024 字符（客户端侧校验在 internal/bot）。
+type CardContent struct {
+	Title       string `json:"title"`
+	Description string `json:"description"`
+	URL         string `json:"url"`
+	PicURL      string `json:"pic_url"`
 }
