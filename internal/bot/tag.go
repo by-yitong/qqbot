@@ -33,3 +33,9 @@ func (c *Ctx) ReplyTaggedOrPlain(md, plain string) {
 		_, _ = c.ReplyText(plain)
 	}
 }
+
+// AtEveryoneTag 官方 @全体成员内嵌标签（2026-10-26 新增）：拼进群聊文本（MsgType=0）
+// content 或 markdown（MsgType=2）content 开头即可 @全体成员。三重硬限：仅群聊场景；
+// 机器人须为该群管理员；每群每天仅可发 1 次（超限/无权限整条消息被官方拒绝，调用方
+// 须准备纯文本降级；单聊不支持）。
+const AtEveryoneTag = "<qqbot-at-everyone />"
