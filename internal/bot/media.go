@@ -304,3 +304,15 @@ func truncateStr(s string, n int) string {
 	}
 	return s[:n]
 }
+
+// UploadMediaImage 上传素材图片到平台，返回 qqbot-media:// 引用：markdown 消息中用
+// ![说明 #宽px #高px](url) 引用（与公网图片语法一致，可混用），发送时平台自动转存。
+// 90 天滑动有效期（每次被引用顺延）；校验（≤10MB、png/jpeg/gif/webp、扩展名与
+// content_type 一致）在 fork 一步式里做，这里纯透传。
+func (b *Bot) UploadMediaImage(ctx context.Context, fileName, contentType string, data []byte) (*dto.MediaImage, error) {
+	api, err := b.openapi()
+	if err != nil {
+		return nil, err
+	}
+	return api.UploadMediaImage(ctx, fileName, contentType, data)
+}

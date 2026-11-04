@@ -175,3 +175,43 @@ func buildTestWAV() []byte {
 	b.Write(data)
 	return b.Bytes()
 }
+
+// TestUploadMediaImage Bot 级透传链路：prepare→PUT→complete 走通，返回引用；
+// 空内容在 fork 校验被拦（未发 HTTP）。
+func TestUploadMediaImage(t *testing.T) {
+	calls := 0
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.ReadAll(r.Body)
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/v2/media-images/prepare"):
+			fmt.Fprintf(w, `{"upload_id":"U1","presigned_url":%q,"expires_in":600}`, srv.URL+"/put")
+		case r.URL.Path == "/put":
+			w.Header().Set("ETag", `"d41d8cd98f00b204e9800998ecf8427e"`)
+		case strings.HasSuffix(r.URL.Path, "/v2/media-images/complete"):
+			fmt.Fprint(w, `{"image_id":"I1","url":"qqbot-media://image/v1/T","ttl":7776000,"preview_url":"https://p"}`)
+		default:
+			t.Errorf("意外请求: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	b := testBot(t, srv)
+	// 空内容：fork 校验拦截，未发任何请求。
+	if _, err := b.UploadMediaImage(context.Background(), "a.png", "image/png", []byte{}); err == nil ||
+		!strings.Contains(err.Error(), "图片内容为空") {
+		t.Fatalf("空内容应被拦: %v", err)
+	}
+	if calls != 0 {
+		t.Fatalf("空内容不应发请求, got %d 次", calls)
+	}
+	img, err := b.UploadMediaImage(context.Background(), "a.png", "image/png", []byte("x"))
+	if err != nil {
+		t.Fatalf("UploadMediaImage: %v", err)
+	}
+	if img.URL != "qqbot-media://image/v1/T" || img.ImageID != "I1" {
+		t.Errorf("MediaImage=%+v", img)
+	}
+}
