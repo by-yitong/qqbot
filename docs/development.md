@@ -202,6 +202,21 @@ b.Command("echo", echo).
   任务列表（`plugins/tasks.go`）、黑名单列表（`plugins/member.go`，openid 手打不出，
   点「解除」标签是唯一实用路径）。
 
+### 用户基本信息接口（官方 2026-11-16 新增）
+
+```go
+b.GetUserInfo(ctx, userOpenID)   // GET /v2/users/{user_openid}/info
+```
+
+- 10 QPS；错误码 `40184001` = 与机器人无好友关系。
+- 响应 `bot.UserInfo`：`union_openid`（跨应用关联用户 openid，绑定 3 方应用时有效）、
+  `username`（用户名）、`avatar`（头像原图 URL）、`allow_proactive_msg`（是否接收主动推送）。
+
+**同批事件新字段**：单聊消息事件 author 开始下发 `username`（昵称）/`avatar`（头像）；群消息
+事件 author 增加 `member_nickname`（群内昵称，`Ctx.username` 优先取它）与 `avatar`；
+群信息接口（`GroupInfo`）、群消息事件（`Message`）、群成员加入事件（`GroupMemberAddEvent`）
+增加 `union_group_openid`（跨应用关联群 openid，绑定 3 方应用时有效）。
+
 ### 用户头像 URL（免鉴权直取）
 
 ```
