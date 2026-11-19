@@ -232,6 +232,8 @@ func setupAgent(b *bot.Bot, mem *memory.Store, imgbedCli *imgbed.Client, imgbedM
 		plugins.WithGapFile(utils.EnvOr("AGENT_GAP_MARKERS", "./data/gap_markers.json")),
 		plugins.WithImageHost(imgHost),
 		plugins.WithSteerAck(utils.EnvInt("AGENT_STEER_ACK", 1) != 0),
+		// 单聊流式回复开关（0=关，关闭后整条发送）
+		plugins.WithStreaming(utils.EnvInt("AGENT_STREAM", 1) != 0),
 		// 长任务提示：Run 超过 AGENT_HINT_SEC（默认 8s，0=关）没结束先回「任务进行中」，
 		// 结束撤回；超 2 分钟撤回窗口按 AGENT_HINT_REFRESH_SEC（默认 100s）滚动换新。
 		plugins.WithProgressHint(

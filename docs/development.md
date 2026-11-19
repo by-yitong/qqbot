@@ -168,6 +168,16 @@ b.Command("echo", echo).
 | `b.SendGroupMarkdown(ctx, groupID, msgAnchor, md)` | 群：msgAnchor 空=主动；非空=被动 |
 | `b.SendC2CMarkdown(ctx, userID, msgAnchor, md)` | 私聊：同上 |
 
+单聊流式消息（打字机效果，官方 2026-11 新增，`internal/bot/stream.go`）：
+`w := bot.NewC2CStreamWriter(b, userOpenID, anchorMsgID)` 创建写入器（鸭子类型满足
+agent.StreamSink：只需 `OnDelta(string)` / `OnSegmentBreak()` 两个方法）。懒开流（首次
+OnDelta 才发首片）、500ms 节流、replace 模式全量推送（跳过的内容不丢，`Finish` 必推
+最终全文）；`Finish(finalText)` 以 state=10 收尾，`OnSegmentBreak()` 收尾当前段、下段开
+新消息，`Abort()` 尽力收尾，`Delivered()` 报告是否有分片送达——首片失败自动降级
+（false，上层改走静态发送），续片失败仅记日志继续。走独立端点
+POST /v2/users/{user_openid}/stream_messages（50 QPS；错误码 40007=前缀不可改、
+50002=频控）。单聊专用，群聊不用。
+
 > **本机器人现状（2026-09 实测）**：主动消息已开通、原生 markdown 可发——群/私聊空锚点
 > 主动发（上线通知、入群欢迎、webhook 推送、定时任务在用）与原生 md（含内嵌指令标签、
 > `![图片](url)` 图片语法）都正常，**无需**在 q.qq.com 建 markdown 模板。官方公域语义上仍保留
@@ -276,6 +286,13 @@ b.GroupState(c.GroupID()).GetString("mode")
 帮助按分类分组展示：命令注册时用 `.Category(bot.CatXxx)` 归类（常量见 `command.go`：
 通用/娱乐/音乐/群管/AI 助手/定时任务/管理；不设置归「通用」）。组内保持注册顺序，
 分组顺序取各分类首个命令的注册先后。
+
+### AI 兜底 agent（plugins/agent.go）单聊流式回复
+已启用（`AGENT_STREAM`，默认开）：私聊回复走流式——LLM SSE 增量经
+`agent.WithStreamSink` 透出，`bot.C2CStreamWriter` 推 stream_messages（500ms 节流，
+replace 全量推送），`Finish` 推最终全文收尾；模型/网关不支持流式（`ErrStreamUnsupported`
+自动退回 Complete）或首片发送失败时自动降级整条 markdown。群聊/频道始终整条发送；
+流式开启的单聊跳过「任务进行中」提示（打字机增量本身即进度）。
 
 ## 验证
 

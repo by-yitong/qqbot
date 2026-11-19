@@ -39,6 +39,7 @@ type AgentPlugin struct {
 	imgHost      *imgstore.Host // 发图床（send_image 收到本地文件路径时经此转公网 URL）
 	hintDelay    time.Duration  // 长任务提示：Run 超过此时长发「任务进行中」（0=关）
 	hintRefresh  time.Duration  // 提示滚动换新间隔（撤回窗口 2 分钟，须小于它）
+	streaming    bool           // 单聊流式回复（打字机；LLM 须支持 SSE，失败自动降级整条）
 
 	gapMu   sync.Mutex
 	lastGap map[string]time.Time // 群id → 上次注入覆盖到的最后一条消息时间
@@ -89,6 +90,13 @@ func WithProgressHint(delay, refresh time.Duration) AgentOption {
 	}
 }
 
+// WithStreaming 设置单聊流式回复开关（默认开）：私聊回复经 bot.C2CStreamWriter
+// 打字机式推送（LLM SSE 增量），模型/网关不支持或首片失败自动降级整条 markdown。
+// 群聊/频道不受影响，始终整条发送。
+func WithStreaming(on bool) AgentOption {
+	return func(p *AgentPlugin) { p.streaming = on }
+}
+
 // NewAgent 用配置好的 agent 构造插件（默认首次全量窗口 60 分钟 / 30 条，补充确认开）。
 func NewAgent(ag *agent.Agent, opts ...AgentOption) *AgentPlugin {
 	p := &AgentPlugin{
@@ -96,6 +104,7 @@ func NewAgent(ag *agent.Agent, opts ...AgentOption) *AgentPlugin {
 		recentWindow: 60 * time.Minute,
 		recentMax:    30,
 		steerAck:     true,
+		streaming:    true,
 		lastGap:      map[string]time.Time{},
 	}
 	for _, opt := range opts {
@@ -287,12 +296,28 @@ func (p *AgentPlugin) handle(c *bot.Ctx) {
 		})
 	}
 
+	// 单聊流式回复（打字机）：LLM SSE 增量经 C2CStreamWriter 推 stream_messages，
+	// 群聊/频道/关流式保持整条静态发送。首片失败 writer 内部已标记（Delivered=false），
+	// Run 结束后按它分流。
+	var w *bot.C2CStreamWriter
+	if p.useStream(c) {
+		w = bot.NewC2CStreamWriter(c.Bot, c.UserID(), c.MessageID())
+		opts = append(opts, agent.WithStreamSink(w))
+	}
+
 	// 长任务提示：Run 超过阈值仍未结束先回一条「任务进行中」，结束时撤回
 	// （超 2 分钟撤回窗口则滚动换新；细节见 progresshint.go）。
-	finishHint := p.startProgressHint(c)
+	// 单聊流式时跳过：打字机增量本身可见即进度，hint 冗余。
+	finishHint := func() {}
+	if w == nil {
+		finishHint = p.startProgressHint(c)
+	}
 	reply, err := p.ag.Run(runCtx, key, question, opts...)
 	finishHint()
 	if err != nil {
+		if w != nil {
+			w.Abort() // 异常路径尽力收尾流式消息
+		}
 		if errors.Is(err, agent.ErrInterrupted) {
 			return // 被用户主动停止：.stop 命令已回复「已停止」，这里静默
 		}
@@ -301,14 +326,33 @@ func (p *AgentPlugin) handle(c *bot.Ctx) {
 		return
 	}
 	if reply != "" {
-		// AI 回复统一走 markdown（纯文本作为 markdown 也合法，渲染基本无害）；
-		// 群/频道开头 @发送人，多人群聊里能看清是在回谁。记忆里存不带 @ 的原文。
-		if _, serr := c.ReplyMarkdown(mentionPrefix(c) + reply); serr == nil {
-			p.recordReply(c, reply)
-		} else if _, terr := c.ReplyText(mentionPrefix(c) + reply); terr == nil {
-			p.recordReply(c, reply) // markdown 发不出（如语料审核拒绝）时回退纯文本
-		}
+		p.deliverReply(c, w, reply)
 	}
+}
+
+// deliverReply Run 成功后的回复投递：流式已送达（至少一个分片成功）则 Finish 推最终
+// 全文收尾（失败仅记日志不降级重发——内容已大概率在屏上，重发会重复），否则走整条
+// 静态发送。w 为 nil（群聊/频道/关流式）时直接静态路径。
+func (p *AgentPlugin) deliverReply(c *bot.Ctx, w *bot.C2CStreamWriter, reply string) {
+	if w != nil && w.Delivered() {
+		if err := w.Finish(reply); err != nil {
+			log.Printf("[agent] 流式收尾失败（忽略）: %v", err)
+		}
+		p.recordReply(c, reply)
+		return
+	}
+	// AI 回复统一走 markdown（纯文本作为 markdown 也合法，渲染基本无害）；
+	// 群/频道开头 @发送人，多人群聊里能看清是在回谁。记忆里存不带 @ 的原文。
+	if _, serr := c.ReplyMarkdown(mentionPrefix(c) + reply); serr == nil {
+		p.recordReply(c, reply)
+	} else if _, terr := c.ReplyText(mentionPrefix(c) + reply); terr == nil {
+		p.recordReply(c, reply) // markdown 发不出（如语料审核拒绝）时回退纯文本
+	}
+}
+
+// useStream 本次消息是否走单聊流式回复：私聊且流式开关开启（群聊/频道一律整条）。
+func (p *AgentPlugin) useStream(c *bot.Ctx) bool {
+	return p.streaming && c.IsPrivate()
 }
 
 // startProgressHint 为本次 Run 启动「任务进行中」提示：提示用 c.ReplyText 发

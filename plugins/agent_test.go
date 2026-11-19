@@ -1,10 +1,16 @@
 package plugins
 
 import (
+	"bytes"
+	"fmt"
+	"log"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
+	"qqbot/internal/agent"
 	"qqbot/internal/bot"
 	"qqbot/internal/memory"
 )
@@ -185,4 +191,104 @@ func TestShortenDur(t *testing.T) {
 			t.Errorf("shortenDur(%v)=%q want %q", tc.in, got, tc.want)
 		}
 	}
+}
+
+func TestWithStreamingOption(t *testing.T) {
+	if p := NewAgent(nil); !p.streaming {
+		t.Error("NewAgent 默认应开启单聊流式回复")
+	}
+	if p := NewAgent(nil, WithStreaming(false)); p.streaming {
+		t.Error("WithStreaming(false) 应关闭流式")
+	}
+	if p := NewAgent(nil, WithStreaming(true)); !p.streaming {
+		t.Error("WithStreaming(true) 应开启流式")
+	}
+}
+
+func TestUseStream(t *testing.T) {
+	p := NewAgent(nil)
+	if !p.useStream(bot.NewEventCtx(nil, "c2c", "hi", "u1", "", "", "m1", "", false)) {
+		t.Error("私聊且开关开应走流式")
+	}
+	for _, src := range []string{"group", "channel"} {
+		if p.useStream(bot.NewEventCtx(nil, src, "hi", "u1", "", "g9", "m1", "", true)) {
+			t.Errorf("%s 不应走流式", src)
+		}
+	}
+	off := NewAgent(nil, WithStreaming(false))
+	if off.useStream(bot.NewEventCtx(nil, "c2c", "hi", "u1", "", "", "m1", "", false)) {
+		t.Error("开关关时私聊也不应走流式")
+	}
+}
+
+// sseLLMServer 起一个回 SSE 流式补全的假 LLM（单轮流，回固定文本）。
+func sseLLMServer(t *testing.T, text string) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fl, _ := w.(http.Flusher)
+		for _, line := range []string{
+			`data: {"choices":[{"delta":{"content":"` + text + `"}}]}`,
+			`data: {"choices":[{"delta":{},"finish_reason":"stop"}]}`,
+			`data: [DONE]`,
+			"",
+		} {
+			_, _ = fmt.Fprintln(w, line)
+			if fl != nil {
+				fl.Flush()
+			}
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// captureLog 临时接管标准 log 输出，返回缓冲区（测试结束自动还原）。
+func captureLog(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	old := log.Writer()
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(old) })
+	return &buf
+}
+
+// TestStreamingSinkPath handle 接线冒烟：单聊+开关开时 Run 挂流式 sink（OnDelta 触发
+// 首片推送；Bot 未连接使首片失败，打降级日志后走静态路径，不 panic）；群聊与关流式
+// 不构造 writer、不发流式请求（无降级日志）。
+func TestStreamingSinkPath(t *testing.T) {
+	llmURL := sseLLMServer(t, "你好呀").URL
+	mkPlugin := func(streaming bool) *AgentPlugin {
+		ag := agent.New(agent.Config{LLM: agent.NewLLMClient(llmURL, "k", "m"), Tools: agent.NewRegistry()})
+		return NewAgent(ag, WithStreaming(streaming))
+	}
+	degradeLog := "流式消息首片发送失败"
+
+	t.Run("私聊+开关开", func(t *testing.T) {
+		p := mkPlugin(true)
+		buf := captureLog(t)
+		c := bot.NewEventCtx(bot.New(bot.Config{}), "c2c", "hi", "u1", "", "", "m1", "", false)
+		p.handle(c) // 不 panic 即接线正确：首片失败降级、静态发送 api 未连接静默失败
+		if !strings.Contains(buf.String(), degradeLog) {
+			t.Errorf("单聊流式应触发 sink 首片推送（未打降级日志）: %q", buf.String())
+		}
+	})
+	t.Run("群聊不走流式", func(t *testing.T) {
+		p := mkPlugin(true)
+		buf := captureLog(t)
+		c := bot.NewEventCtx(bot.New(bot.Config{}), "group", "hi", "u1", "小明", "g9", "m1", "", true)
+		p.handle(c)
+		if strings.Contains(buf.String(), degradeLog) {
+			t.Error("群聊不应构造流式 writer")
+		}
+	})
+	t.Run("关流式不走流式", func(t *testing.T) {
+		p := mkPlugin(false)
+		buf := captureLog(t)
+		c := bot.NewEventCtx(bot.New(bot.Config{}), "c2c", "hi", "u1", "", "", "m1", "", false)
+		p.handle(c)
+		if strings.Contains(buf.String(), degradeLog) {
+			t.Error("关流式后不应构造流式 writer")
+		}
+	})
 }
