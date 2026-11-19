@@ -3,7 +3,7 @@ module qqbot
 go 1.26.0
 
 require (
-	github.com/by-yitong/botgo v0.1.0
+	github.com/by-yitong/botgo v0.2.0
 	github.com/glebarez/sqlite v1.11.0
 	github.com/hajimehoshi/go-mp3 v0.3.4
 	github.com/joho/godotenv v1.5.1
