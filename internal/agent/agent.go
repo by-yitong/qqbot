@@ -121,6 +121,10 @@ func (a *Agent) Run(ctx context.Context, userID, userText string, opts ...RunOpt
 
 	var lastReply string
 	var overflowCompacted bool // 每次 Run 至多做一次溢出压缩+重试，防死循环
+	sink := o.streamSink       // 流式增量端（可能为 nil）；模型不支持流式时自动退回 Complete
+	streamOff := false         // ErrStreamUnsupported 后置位：后续轮次全部直接走 Complete，不再探测
+	streamCalls := 0           // 已发起的流式调用数（除第一次外，发起前先发分段信号）
+	prevContent := ""          // 上一轮 LLM 文本，决定流式分段时机
 	iter := 0
 	for {
 		// turn 边界：注入运行中补充的消息（steering）。用户主动补充重置迭代预算。
@@ -157,7 +161,21 @@ func (a *Agent) Run(ctx context.Context, userID, userText string, opts ...RunOpt
 			tools = a.cfg.Tools.OpenAISchemas()
 		}
 		sys := a.systemPromptFor(o)
-		result, err := a.cfg.LLM.Complete(loopCtx, sys, msgs, tools)
+		var result *LLMResult
+		var err error
+		if sc, ok := a.cfg.LLM.(StreamCompleter); ok && sink != nil && !streamOff {
+			if streamCalls > 0 && prevContent != "" {
+				sink.OnSegmentBreak() // 上一轮已产出文本：收尾该段，本轮增量归新消息
+			}
+			streamCalls++
+			result, err = sc.CompleteStream(loopCtx, sys, msgs, tools, sink.OnDelta)
+			if err != nil && errors.Is(err, ErrStreamUnsupported) {
+				streamOff = true // 模型不支持流式：本轮立即用 Complete 重试，之后不再探测
+				result, err = a.cfg.LLM.Complete(loopCtx, sys, msgs, tools)
+			}
+		} else {
+			result, err = a.cfg.LLM.Complete(loopCtx, sys, msgs, tools)
+		}
 		// 上下文超长：强制压缩（用更紧凑的历史）后重试一次。每次 Run 至多一次，避免死循环。
 		// 急救路径用比配置更紧的保留窗口（配置可能设得很大——曾有人设 120，压缩完仍超限）。
 		if err != nil && errors.Is(err, ErrContextOverflow) && !overflowCompacted {
@@ -201,6 +219,7 @@ func (a *Agent) Run(ctx context.Context, userID, userText string, opts ...RunOpt
 		if result.Content != "" {
 			lastReply = result.Content
 		}
+		prevContent = result.Content
 
 		if len(result.ToolCalls) == 0 {
 			// 纯文本回复：无补充则正常结束；期间又来了补充则继续作答。
@@ -239,6 +258,18 @@ func (a *Agent) Run(ctx context.Context, userID, userText string, opts ...RunOpt
 		return "", errors.New("agent: 未产生回复（达到迭代上限或超时）")
 	}
 	return lastReply, nil
+}
+
+// StreamSink 接收 LLM 流式增量；实现方自行做节流与降级。
+type StreamSink interface {
+	OnDelta(accumText string) // 当前段累积全文；首次调用即新段开始
+	OnSegmentBreak()          // 收尾当前段；后续 OnDelta 属于新段（新消息）
+}
+
+// WithStreamSink 为本次 Run 绑定流式输出端：LLM 支持流式时，每轮的增量文本经它透出。
+// 模型不支持流式（ErrStreamUnsupported）时 agent 自动退回 Complete，sink 收不到回调。
+func WithStreamSink(s StreamSink) RunOption {
+	return func(o *runOptions) { o.streamSink = s }
 }
 
 // DefaultSystemPrompt 是未配置 cfg.SystemPrompt 时的人设兜底（QQ bot 取向）。

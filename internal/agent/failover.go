@@ -130,6 +130,65 @@ func (f *FailoverClient) Complete(ctx context.Context, system string, msgs []Mes
 	return result, nil
 }
 
+// CompleteStream 走当前活跃模型的流式补全；活跃后端不支持流式时返回 ErrStreamUnsupported。
+// 失败计数/熔断/回切与 Complete 走同一套通路。
+func (f *FailoverClient) CompleteStream(ctx context.Context, system string, msgs []Message, tools []map[string]any, onDelta func(accum string)) (*LLMResult, error) {
+	f.mu.Lock()
+	useFallback := f.usingFallback
+	f.mu.Unlock()
+
+	if !useFallback {
+		sc, ok := f.primary.(StreamCompleter)
+		if !ok {
+			return nil, ErrStreamUnsupported
+		}
+		result, err := sc.CompleteStream(ctx, system, msgs, tools, onDelta)
+		if err == nil {
+			f.mu.Lock()
+			f.failures = 0
+			f.mu.Unlock()
+			return result, nil
+		}
+		if isErrContentProblem(err) || errors.Is(err, ErrStreamUnsupported) {
+			return nil, err // 能力/内容/取消类问题：换模型也一样，不计熔断
+		}
+		f.mu.Lock()
+		f.failures++
+		tripped := f.fallback != nil && f.failures >= f.breakerThreshold
+		if tripped {
+			f.usingFallback = true
+		}
+		f.mu.Unlock()
+		if !tripped {
+			return nil, err
+		}
+		log.Printf("[llm] 主模型连续失败 %d 次，熔断切换到备用模型", f.failures)
+		useFallback = true
+	}
+
+	if f.fallback == nil {
+		sc, ok := f.primary.(StreamCompleter)
+		if !ok {
+			return nil, ErrStreamUnsupported
+		}
+		return sc.CompleteStream(ctx, system, msgs, tools, onDelta)
+	}
+	sc, ok := f.fallback.(StreamCompleter)
+	if !ok {
+		return nil, ErrStreamUnsupported
+	}
+	result, err := sc.CompleteStream(ctx, system, msgs, tools, onDelta)
+	if err != nil {
+		// 备用也失败：下次调用先再试一次主模型（可能刚好恢复了），避免双双卡死。
+		f.mu.Lock()
+		f.usingFallback = false
+		f.failures = f.breakerThreshold - 1
+		f.mu.Unlock()
+		return nil, err
+	}
+	return result, nil
+}
+
 // probeLoop 熔断期间周期性探活主模型，恢复即切回。
 func (f *FailoverClient) probeLoop() {
 	ticker := time.NewTicker(f.probeInterval)

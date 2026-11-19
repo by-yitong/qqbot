@@ -23,9 +23,10 @@ type RunOption func(*runOptions)
 
 type runOptions struct {
 	responder  Responder
-	ctxBlock   string   // 动态上下文块：临时消息插在问题前，不落 session
-	persistBlk string   // 持久补充块（如增量群聊记录）：普通 user 消息插在问题前，照常落盘
-	images     []string // 本次问题携带的图片 URL：以 image_url 形式发给多模态模型
+	ctxBlock   string     // 动态上下文块：临时消息插在问题前，不落 session
+	persistBlk string     // 持久补充块（如增量群聊记录）：普通 user 消息插在问题前，照常落盘
+	images     []string   // 本次问题携带的图片 URL：以 image_url 形式发给多模态模型
+	streamSink StreamSink // 流式增量输出端（见 WithStreamSink）
 }
 
 // WithResponder 为本次 Run 绑定一个 responder（工具可经 ResponderFrom 取用）。
