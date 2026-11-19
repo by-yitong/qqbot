@@ -1,6 +1,6 @@
 package bot
 
-// 自定义菜单与指令面板（协议实现在 pkg/botgo：GET/PUT /v2/menu、POST/DELETE /v2/panels）。
+// 自定义菜单与指令面板（协议实现在 github.com/by-yitong/botgo：GET/PUT /v2/menu、POST/DELETE /v2/panels）。
 // 本层保留发布编排（配置加载 / 按命令自动生成 / 覆盖式应用）。
 //
 //   - 自定义菜单：C2C 单聊窗口底部按钮栏，PUT /v2/menu 覆盖式设置，对所有用户生效。
@@ -15,7 +15,7 @@ import (
 	"fmt"
 	"os"
 
-	"qqbot/pkg/botgo/dto"
+	"github.com/by-yitong/botgo/dto"
 )
 
 // AutoPanelRemark 是本程序自动创建面板的 remark 标记：重新发布时按它识别并删除旧面板
@@ -43,7 +43,7 @@ type PanelItem = dto.PanelItem
 // PanelEntry 是面板列表查询结果。
 type PanelEntry = dto.PanelEntry
 
-// --- API 调用（委托 pkg/botgo）---
+// --- API 调用（委托 github.com/by-yitong/botgo）---
 
 // SetMenu 覆盖式设置全局自定义菜单，返回新版本号。
 func (b *Bot) SetMenu(ctx context.Context, m Menu) (int, error) {

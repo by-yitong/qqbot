@@ -1,11 +1,11 @@
 package bot
 
-// 用户基本信息 API 门面（协议实现在 pkg/botgo，本层只做连接保护与类型别名）。
+// 用户基本信息 API 门面（协议实现在 github.com/by-yitong/botgo，本层只做连接保护与类型别名）。
 
 import (
 	"context"
 
-	"qqbot/pkg/botgo/dto"
+	"github.com/by-yitong/botgo/dto"
 )
 
 // UserInfo 是用户基本信息。

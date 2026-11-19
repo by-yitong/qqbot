@@ -1,6 +1,6 @@
 package bot
 
-// 群管理 API 门面：群信息、成员与黑名单、禁言、入群审批（协议实现在 pkg/botgo，
+// 群管理 API 门面：群信息、成员与黑名单、禁言、入群审批（协议实现在 github.com/by-yitong/botgo，
 // 本层只做连接保护与类型别名）。群事件监听（成员入群/入群申请）见 groupevent.go。
 //
 // ⚠️ 除注明外均为白名单机制：非白名单机器人返回错误码 11253（应用无接口访问权限，
@@ -11,7 +11,7 @@ import (
 	"fmt"
 	"time"
 
-	"qqbot/pkg/botgo/dto"
+	"github.com/by-yitong/botgo/dto"
 )
 
 // --- 群信息与机器人状态 ---
@@ -230,7 +230,7 @@ type GroupJoinRequestItem = dto.GroupJoinRequest
 
 // JoinApprovalStrategy 入群自动审批策略：把关联群中命中白名单 QQ 号的入群申请
 // 自动审批通过。一个机器人最多 20 个策略；仅在机器人拥有关联群管理员身份时生效。
-// （另有创建/修改/删除/执行/白名单维护接口，见 pkg/botgo dto 注释里的官方文档。）
+// （另有创建/修改/删除/执行/白名单维护接口，见 github.com/by-yitong/botgo dto 注释里的官方文档。）
 type JoinApprovalStrategy = dto.JoinApprovalStrategy
 
 // ApproveGroupJoinRequest 审批一条入群申请（通过或拒绝）。

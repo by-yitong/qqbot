@@ -7,8 +7,8 @@ import (
 	"fmt"
 	"strings"
 
-	"qqbot/pkg/botgo/dto"
-	"qqbot/pkg/botgo/dto/keyboard"
+	"github.com/by-yitong/botgo/dto"
+	"github.com/by-yitong/botgo/dto/keyboard"
 )
 
 // ErrNotConnected 在尚未连接（api 未就绪）时由 ReplyText 返回。

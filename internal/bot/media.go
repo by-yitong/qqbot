@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"qqbot/pkg/botgo/dto"
+	"github.com/by-yitong/botgo/dto"
 
 	"qqbot/internal/audio"
 )
@@ -42,7 +42,7 @@ func (m richMediaMsg) GetSendType() dto.SendType { return dto.Text }
 
 // sendRichMedia 上传并发送一条富媒体消息（MsgType=7）的公共路径。
 // group=true 走群、false 走 C2C；fileType: 1图片/2视频/3语音/4文件。
-// 上传协议（URL 模式，POST /v2/{groups|users}/{openid}/files）在 pkg/botgo。
+// 上传协议（URL 模式，POST /v2/{groups|users}/{openid}/files）在 github.com/by-yitong/botgo。
 func (b *Bot) sendRichMedia(ctx context.Context, group bool, openID, msgAnchor string, fileType int, fileURL string) (string, error) {
 	api, err := b.openapi()
 	if err != nil {
@@ -186,7 +186,7 @@ func (b *Bot) SendC2CMediaBytes(ctx context.Context, userID, msgAnchor string, f
 }
 
 // sendMediaBytes 分片上传本地字节并按 MsgType=7 发送。
-// 分片直传协议（官方 chunked-upload 流程）在 pkg/botgo。
+// 分片直传协议（官方 chunked-upload 流程）在 github.com/by-yitong/botgo。
 func (b *Bot) sendMediaBytes(ctx context.Context, group bool, openID, msgAnchor string, fileType int, filename string, data []byte) (string, error) {
 	api, err := b.openapi()
 	if err != nil {

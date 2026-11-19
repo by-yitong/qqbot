@@ -14,8 +14,8 @@ package bot
 import (
 	"log"
 
-	"qqbot/pkg/botgo/dto"
-	"qqbot/pkg/botgo/event"
+	"github.com/by-yitong/botgo/dto"
+	"github.com/by-yitong/botgo/event"
 )
 
 // IntentGroupMemberEvent 是群成员事件（GROUP_MEMBER_ADD / GROUP_MEMBER_REMOVE）的 intent 位。
@@ -49,7 +49,7 @@ type GroupJoinRequestEvent struct {
 	AutoApproved  *JoinAutoApproved      `json:"auto_approved"` // 官方自动审批策略已通过时携带
 }
 
-// 入群验证相关类型（协议定义在 pkg/botgo/dto，这里别名保持旧引用兼容）。
+// 入群验证相关类型（协议定义在 github.com/by-yitong/botgo/dto，这里别名保持旧引用兼容）。
 type JoinAutoApproved = dto.JoinAutoApproved
 
 type JoinRequestVerifyInfo = dto.JoinRequestVerifyInfo

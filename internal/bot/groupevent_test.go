@@ -9,7 +9,7 @@ import (
 	"sync"
 	"testing"
 
-	"qqbot/pkg/botgo/dto"
+	"github.com/by-yitong/botgo/dto"
 )
 
 // 官方文档示例（截断）改写的事件 payload。

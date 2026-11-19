@@ -6,7 +6,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"qqbot/pkg/botgo/dto"
+	"github.com/by-yitong/botgo/dto"
 )
 
 // 图文卡片（官方 2026-10-28 新增，群聊/单聊支持）：msg_type=8 + card（type="tuwen"）。

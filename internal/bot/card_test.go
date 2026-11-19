@@ -13,7 +13,7 @@ import (
 	"strings"
 	"testing"
 
-	"qqbot/pkg/botgo/dto"
+	"github.com/by-yitong/botgo/dto"
 )
 
 func validCard() dto.CardContent {

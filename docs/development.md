@@ -1,12 +1,15 @@
 # 开发教程
 
-本项目三层：`internal/bot`（插件框架，基于 pkg/botgo）→ `internal/agent`（harness）→ `plugins` + `main`（你的功能）。
+本项目三层：`internal/bot`（插件框架，基于 botgo 公共库）→ `internal/agent`（harness）→ `plugins` + `main`（你的功能）。
 
-**QQ 官方协议（HTTP API）统一放 `pkg/botgo`**（botgo v0.2.1 的本地 fork，上游已停更）：
-官方新出的群管理/菜单/富媒体等接口直接补在 fork 里（dto 结构 + `openapi/v1/` 实现 +
-`openapi/iface.go` 子接口，照现有文件的样式写）。`internal/bot` 及以上**不放协议**——
-只做连接保护（`b.openapi()` → `ErrNotConnected`）、类型别名与业务编排（便捷组合、
-自动翻页聚合、菜单发布编排等），插件/agent 永远只调 `internal/bot` 的方法。
+**QQ 官方协议（HTTP API）统一放 [botgo 公共库](https://github.com/by-yitong/botgo）**
+（fork 自 tencent-connect/botgo v0.2.1 抽出的独立仓，本地目录 `../botgo`，上游已停更）：
+官方新出的群管理/菜单/富媒体等接口补在 botgo 仓里（dto 结构 + `openapi/v1/` 实现 +
+`openapi/iface.go` 子接口，照现有文件的样式写），push 后打 tag 发版，再在本仓
+`go get -u github.com/by-yitong/botgo` 升级使用；本地两边联调可用 `go work use ../botgo`。
+`internal/bot` 及以上**不放协议**——只做连接保护（`b.openapi()` → `ErrNotConnected`）、
+类型别名与业务编排（便捷组合、自动翻页聚合、菜单发布编排等），插件/agent 永远只调
+`internal/bot` 的方法。
 
 - 写**普通功能**（命令/关键词/监听）→ 看下面「插件框架」；
 - 给 AI 加**能力**（工具/技能/MCP）→ 看 [agent harness](agent.md)；
@@ -20,14 +23,14 @@ qqbot/
 ├── setup.go                 # agent 装配（工具注册 / MCP / LLM 主备熔断 / 配套插件）
 ├── cmd/imghost/             # 图床服务（独立二进制，部署到公网服务器；给 QQ URL 模式发图用）
 ├── internal/
-│   ├── bot/                 # 插件框架（基于 pkg/botgo，只做编排不含协议）
+│   ├── bot/                 # 插件框架（基于 botgo 公共库，只做编排不含协议）
 │   │   ├── bot.go           # Bot / Config / New / Run（WSS 装配 + 事件分发）+ 收图（attachments）
 │   │   ├── ctx.go           # Ctx（三源：群/频道/私聊）+ ReplyText/Image/Voice + Images()/Mentions()
 │   │   ├── command.go       # Command / Args / 命令匹配 / 作用域 / Help
 │   │   ├── handler.go       # 处理器/中间件类型、监听器、Plugin、Use/UsePlugin
-│   │   ├── media.go         # 发图/视频/语音/文件编排：上传富媒体（协议在 pkg/botgo）→MsgType=7；语音 mp3/wav 自动转 silk
+│   │   ├── media.go         # 发图/视频/语音/文件编排：上传富媒体（协议在 botgo 库）→MsgType=7；语音 mp3/wav 自动转 silk
 │   │   ├── groupevent.go    # 群成员入群/入群申请事件（GROUP_MEMBER_ADD / GROUP_JOIN_REQUEST）
-│   │   ├── group.go         # 群管理 API 门面（信息/成员/黑名单/禁言/入群审批，协议在 pkg/botgo）
+│   │   ├── group.go         # 群管理 API 门面（信息/成员/黑名单/禁言/入群审批，协议在 botgo 库）
 │   │   ├── menu.go / recall.go # 菜单/撤回的薄委托层（类型别名 + b.openapi() 转发）
 │   │   ├── state.go         # 会话状态（按 openid 的 KV）
 │   │   └── doc.go           # 包文档
@@ -180,12 +183,12 @@ b.Command("echo", echo).
 > ~10s 时限（超时报 code 850027「富媒体文件上传超时」）+ 视频 30M 软限——几十 MB 的
 > 大视频 URL 模式必然失败（抖音直链、自建图床中转都一样，2026-10 生产实测 61MB 视频
 > 双双超时）。大文件走分片直传：`c.ReplyMediaBytes(fileType, filename, data)`（我们
-> 推字节给 QQ，协议见 pkg/botgo richmedia.go；openapi 客户端超时已放宽 60s）。
+> 推字节给 QQ，协议见 botgo 库 richmedia.go；openapi 客户端超时已放宽 60s）。
 
 **素材管理（qqbot-media）**：`b.UploadMediaImage(ctx, fileName, contentType, data)` 上传
 图片到平台拿 `qqbot-media://` 引用（≤10MB，png/jpeg/gif/webp，单机器人 100 张，引用 90 天
 滑动过期），markdown 中 `![说明 #宽px #高px](qqbot-media://...)` 引用、平台转存，解决公网
-图片 URL 被 QQ 限时拉取不稳的问题。管理接口（List/Delete）在 `pkg/botgo`（MediaImageAPI）。
+图片 URL 被 QQ 限时拉取不稳的问题。管理接口（List/Delete）在 botgo 库（MediaImageAPI）。
 
 **@全体成员**：群文本/markdown content 拼入 `bot.AtEveryoneTag`（`<qqbot-at-everyone />`）
 即 @全体；限群聊、机器人须群管理员、每群每天 1 次，超限整条被拒，须备纯文本降级。

@@ -10,13 +10,13 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/by-yitong/botgo"
+	"github.com/by-yitong/botgo/dto"
+	"github.com/by-yitong/botgo/dto/message"
+	"github.com/by-yitong/botgo/event"
+	"github.com/by-yitong/botgo/openapi"
+	"github.com/by-yitong/botgo/token"
 	"github.com/tidwall/gjson"
-	"qqbot/pkg/botgo"
-	"qqbot/pkg/botgo/dto"
-	"qqbot/pkg/botgo/dto/message"
-	"qqbot/pkg/botgo/event"
-	"qqbot/pkg/botgo/openapi"
-	"qqbot/pkg/botgo/token"
 
 	"qqbot/internal/imgstore"
 )

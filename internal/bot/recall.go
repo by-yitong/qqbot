@@ -1,7 +1,7 @@
 package bot
 
 // 消息撤回（DELETE /v2/groups|users/{openid}/messages/{message_id}）。
-// 协议实现在 pkg/botgo 的 RetractGroupMessage / RetractC2CMessage（v0.2.1 即有），
+// 协议实现在 github.com/by-yitong/botgo 的 RetractGroupMessage / RetractC2CMessage（v0.2.1 即有），
 // 本层只做连接保护。
 //
 // 成功返回 HTTP 200 无响应体。限制：发送超过 2 分钟的消息不可撤回；

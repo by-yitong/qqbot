@@ -1,7 +1,10 @@
 # AGENTS.md —— 给 AI（ZCode 等）的项目记忆
 
-QQ 官方机器人（Go；QQ 官方协议封装在 `pkg/botgo`——botgo v0.2.1 的本地 fork，上游停更，
-新接口直接补 fork 里，`internal/bot` 及以上不放协议）。代码结构、插件框架、agent harness 的开发文档在
+QQ 官方机器人（Go；QQ 官方协议在独立公共库
+[by-yitong/botgo](https://github.com/by-yitong/botgo)——tencent-connect/botgo v0.2.1 的 fork
+抽出成库，本地目录 `../botgo`，上游停更。**改协议的流程：botgo 仓改 → push → 打 tag →
+本仓 `go get -u github.com/by-yitong/botgo`**；两边联调 `go work use ../botgo`。
+`internal/bot` 及以上不放协议）。代码结构、插件框架、agent harness 的开发文档在
 [docs/development.md](docs/development.md)（改代码前先读），这里只记**部署运维**和
 容易踩的坑。
 
