@@ -283,3 +283,18 @@ func (o *openAPI) ListJoinApprovalStrategies(ctx context.Context) ([]dto.JoinApp
 	}
 	return out, nil
 }
+
+// --- 用户信息（官方 2026-11-16 新增，与群接口同一批 v2 开放接口）---
+
+// GetUserInfo 获取用户基本信息（GET /v2/users/{user_openid}/info）。10 QPS；
+// 错误码 40184001=与机器人无好友关系。
+func (o *openAPI) GetUserInfo(ctx context.Context, userOpenID string) (*dto.UserInfo, error) {
+	rsp, err := o.request(ctx).
+		SetPathParam("user_openid", userOpenID).
+		SetResult(dto.UserInfo{}).
+		Get(o.getURL(userInfoURI))
+	if err != nil {
+		return nil, err
+	}
+	return rsp.Result().(*dto.UserInfo), nil
+}

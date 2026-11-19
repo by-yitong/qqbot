@@ -63,6 +63,9 @@ const (
 	mediaImageCompleteURI uri = "/v2/media-images/complete"
 	mediaImageDeleteURI   uri = "/v2/media-images/{image_id}/delete"
 
+	// --- 用户信息（官方 2026-11-16 新增）---
+	userInfoURI uri = "/v2/users/{user_openid}/info" // 用户基本信息（10 QPS）
+
 	messageURI uri = "/channels/{channel_id}/messages/{message_id}"
 
 	userMeURI       uri = "/users/@me"

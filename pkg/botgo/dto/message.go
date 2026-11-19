@@ -45,6 +45,8 @@ type Message struct {
 	TTL uint `json:"ttl,omitempty"`
 	// 消息场景描述
 	MessageScene MessageScene `json:"message_scene,omitempty"`
+	// 群统一标识（群消息事件顶层下发，绑定 3 方应用时有效，官方 2026-11-16 新增）
+	UnionGroupOpenID string `json:"union_group_openid,omitempty"`
 }
 
 // Embed 结构

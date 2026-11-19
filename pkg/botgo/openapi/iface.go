@@ -306,6 +306,8 @@ type MessageSettingAPI interface {
 // GroupInfoAPI 群信息接口（白名单机制：非白名单机器人返回 11253）
 type GroupInfoAPI interface {
 	GetGroupInfo(ctx context.Context, groupOpenID string) (*dto.GroupInfo, error)
+	// GetUserInfo 获取用户基本信息（官方 2026-11-16 新增，10 QPS）
+	GetUserInfo(ctx context.Context, userOpenID string) (*dto.UserInfo, error)
 	GetGroupBotState(ctx context.Context, groupOpenID string) (*dto.GroupBotState, error)
 }
 

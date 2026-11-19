@@ -8,12 +8,13 @@ package dto
 
 // GroupInfo 群基本信息（GET /v2/groups/{group_openid}/info，30 QPM，白名单）。
 type GroupInfo struct {
-	GroupOpenID     string   `json:"group_openid"`
-	GroupName       string   `json:"group_name"`        // 群名称
-	GroupFingerMemo string   `json:"group_finger_memo"` // 群简介
-	GroupClassText  string   `json:"group_class_text"`  // 群分类
-	GroupTags       []string `json:"group_tags"`        // 群标签列表
-	GroupMemberNum  int      `json:"group_member_num"`  // 群成员人数
+	GroupOpenID      string   `json:"group_openid"`
+	GroupName        string   `json:"group_name"`         // 群名称
+	GroupFingerMemo  string   `json:"group_finger_memo"`  // 群简介
+	GroupClassText   string   `json:"group_class_text"`   // 群分类
+	GroupTags        []string `json:"group_tags"`         // 群标签列表
+	GroupMemberNum   int      `json:"group_member_num"`   // 群成员人数
+	UnionGroupOpenID string   `json:"union_group_openid"` // 跨应用关联群 openid（绑定 3 方应用时有效，官方 2026-11 新增）
 }
 
 // GroupBotState 机器人在指定群内的状态（GET /v2/groups/{group_openid}/bot_state，30 QPM，白名单）。
