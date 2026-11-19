@@ -543,6 +543,9 @@ func (b *Bot) fromMessage(ctx context.Context, source string, m *dto.Message, at
 	if m.Author != nil {
 		userID = m.Author.ID
 		username = m.Author.Username
+		if m.Author.MemberNickname != "" {
+			username = m.Author.MemberNickname
+		}
 	}
 	return &Ctx{
 		Bot:       b,

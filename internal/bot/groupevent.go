@@ -24,10 +24,11 @@ const IntentGroupMemberEvent dto.Intent = 1 << 24
 
 // GroupMemberAddEvent 是 GROUP_MEMBER_ADD 的事件体。
 type GroupMemberAddEvent struct {
-	Timestamp    int64  `json:"timestamp"`     // 事件时间戳（Unix 秒）
-	GroupOpenID  string `json:"group_openid"`  // 群 openid
-	MemberOpenID string `json:"member_openid"` // 新加入成员的 openid
-	UserOpenID   string `json:"user_openid"`   // 新成员的用户 openid（跨应用统一标识，可能为空）
+	Timestamp        int64  `json:"timestamp"`          // 事件时间戳（Unix 秒）
+	GroupOpenID      string `json:"group_openid"`       // 群 openid
+	MemberOpenID     string `json:"member_openid"`      // 新加入成员的 openid
+	UserOpenID       string `json:"user_openid"`        // 新成员的用户 openid（跨应用统一标识，可能为空）
+	UnionGroupOpenID string `json:"union_group_openid"` // 跨应用关联群 openid（绑定 3 方应用时有效，官方 2026-11 新增）
 }
 
 // GroupJoinRequestEvent 是 GROUP_JOIN_REQUEST 的事件体；字段与 ListGroupJoinRequests
